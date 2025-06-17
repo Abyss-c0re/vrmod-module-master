@@ -542,22 +542,47 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 
 LUA_FUNCTION(SubmitSharedTexture) {
 #ifdef _WIN32
-    if (g_d3d11Texture == NULL)
+    // Windows handles texture validity through Direct3D
+    if (g_sharedTexture == NULL) {
+        LUA->ThrowError("Shared texture is NULL (Windows)");
         return 0;
-    IDirect3DQuery9* pEventQuery = nullptr;
-    g_pD3D9Device->CreateQuery(D3DQUERYTYPE_EVENT, &pEventQuery);
-    if (pEventQuery != nullptr)
-    {
-        pEventQuery->Issue(D3DISSUE_END);
-        while (pEventQuery->GetData(nullptr, 0, D3DGETDATA_FLUSH) != S_OK);
-        pEventQuery->Release();
+    }
+#else
+    // Linux OpenGL check
+    if (g_sharedTexture == GL_INVALID_VALUE || g_sharedTexture == 0) {
+        LUA->ThrowError("Shared texture is invalid or not created (OpenGL)");
+        return 0;
+    }
+
+    // Optional: double-check if texture exists in OpenGL context
+    if (!glIsTexture(g_sharedTexture)) {
+        LUA->ThrowError("Shared texture is not a valid OpenGL texture");
+        return 0;
     }
 #endif
-    vr::VRCompositor()->Submit(vr::EVREye::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
-    vr::VRCompositor()->Submit(vr::EVREye::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
-    return 0;
-}
 
+    // Proceed to submit texture to OpenVR compositor
+    g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
+    g_vrTexture.eType = vr::TextureType_OpenGL;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+
+    vr::EVRCompositorError err = vr::VRCompositor()->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
+    if (err != vr::VRCompositorError_None) {
+        LUA->PushBool(false);
+        LUA->PushString("Submit to Eye_Left failed");
+        return 2;
+    }
+
+    err = vr::VRCompositor()->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+    if (err != vr::VRCompositorError_None) {
+        LUA->PushBool(false);
+        LUA->PushString("Submit to Eye_Right failed");
+        return 2;
+    }
+
+    LUA->PushBool(true);
+    return 1;
+}
 LUA_FUNCTION(Shutdown) {
     if (g_pSystem != NULL) {
         vr::VR_Shutdown();
