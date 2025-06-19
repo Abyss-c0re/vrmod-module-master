@@ -200,7 +200,7 @@ LUA_FUNCTION(Init) {
     if (g_GL) 
         g_GL = NULL;
         g_createTexture = NULL;
-        g_sharedTexture == GL_INVALID_VALUE;
+        g_sharedTexture = GL_INVALID_VALUE;
 
     for(int i = 0; i < LuaRefIndex_Max; i++){
         LUA->CreateTable();
