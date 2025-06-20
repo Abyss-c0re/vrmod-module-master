@@ -577,11 +577,10 @@ LUA_FUNCTION(SubmitSharedTexture) {
     return 0;
 }
 
-
 LUA_FUNCTION(Shutdown) {
     if (vr::VRCompositor()) {
         vr::VRCompositor()->ClearLastSubmittedFrame();
-        vr::VRCompositor()->SuspendRendering(true); // Optional but recommended
+        vr::VRCompositor()->SuspendRendering(true);
     }
 
     if (g_pSystem != NULL) {
@@ -590,14 +589,22 @@ LUA_FUNCTION(Shutdown) {
     }
 
     // Clear Lua references
-    for (int i = 0; i < g_luaRefCount; i++)
-        LUA->ReferenceFree(g_luaRefs[i]);
+    for (int i = 0; i < g_luaRefCount; i++) {
+        if (g_luaRefs[i] != 0) {
+            LUA->ReferenceFree(g_luaRefs[i]);
+            g_luaRefs[i] = 0;
+        }
+    }
     g_luaRefCount = 0;
 
-    for (int i = 0; i < g_actionCount; i++)
-        for (int j = 0; j < 2; j++)
-            LUA->ReferenceFree(g_actions[i].luaRefs[j]);
-
+    for (int i = 0; i < g_actionCount; i++) {
+        for (int j = 0; j < 2; j++) {
+            if (g_actions[i].luaRefs[j] != 0) {
+                LUA->ReferenceFree(g_actions[i].luaRefs[j]);
+                g_actions[i].luaRefs[j] = 0;
+            }
+        }
+    }
     g_actionCount = 0;
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
@@ -620,19 +627,26 @@ LUA_FUNCTION(Shutdown) {
         glDeleteTextures(1, &g_sharedTexture);
         g_sharedTexture = GL_INVALID_VALUE;
     }
-#endif
 
-    g_vrTexture.handle = nullptr;
-    g_vrTexture.eType = vr::TextureType_OpenGL;  // Or _D3D11 depending on platform
-    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
+    if (g_vrTexture.handle) {
+        GLuint texHandle = (GLuint)(uintptr_t)g_vrTexture.handle;
+        if (texHandle != 0 && texHandle != GL_INVALID_VALUE) {
+            glDeleteTextures(1, &texHandle);
+        }
+        g_vrTexture.handle = nullptr;
+    }
+    g_vrTexture.eType = vr::TextureType_Invalid;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
 
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
-
+#endif
 
     LuaPrint(LUA, "VRMOD: Shutdown cleanup complete");
     return 0;
 }
+
+
 
 
 LUA_FUNCTION(TriggerHaptic) {
