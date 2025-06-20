@@ -15,6 +15,8 @@
 #define PATH_MAX MAX_PATH
 #else
 #include <GL/gl.h>
+#include <GL/glext.h>
+#include <GL/glx.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -41,6 +43,8 @@ enum ELuaRefIndex{
     LuaRefIndex_ActionTable,
     LuaRefIndex_Max,
 };
+typedef void (APIENTRYP PFNGLBINDFRAMEBUFFERPROC)(GLenum, GLuint);
+static PFNGLBINDFRAMEBUFFERPROC pglBindFramebuffer = NULL;
 
 typedef struct {
     vr::VRActionHandle_t handle;
@@ -169,6 +173,8 @@ LUA_FUNCTION(Init) {
 # endif
     if (!lib) LUA->ThrowError("VRMOD: dlopen failed");
 
+    pglBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)glXGetProcAddress((const GLubyte *)"glBindFramebuffer");
+
     GetOpenGLEntryPoints_t GetOpenGLEntryPoints = (GetOpenGLEntryPoints_t)dlsym(lib, "GetOpenGLEntryPoints");
     if (!GetOpenGLEntryPoints) LUA->ThrowError("VRMOD: dlsym failed");
 
@@ -180,6 +186,22 @@ LUA_FUNCTION(Init) {
 # else
     g_createTexture = *((void**)&g_GL->firstFunc + 48);
 # endif
+    // Create shared OpenGL texture for VR submission
+    glGenTextures(1, &g_sharedTexture);
+    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    // Allocate empty texture (placeholder size - 1024x1024 RGBA8)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1024, 1024, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    // Prepare OpenVR texture descriptor
+    g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
+    g_vrTexture.eType = vr::TextureType_OpenGL;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma; // or Auto, depending on your pipeline
+
 #endif
 
     return 0;
@@ -285,6 +307,13 @@ void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int r
     }
 }
 
+void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
+    LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    LUA->GetField(-1, "print");
+    LUA->PushString(msg);
+    LUA->Call(1, 0);
+    LUA->Pop(1);
+}
 LUA_FUNCTION(GetDisplayInfo) {
     float fNearZ = (float)LUA->CheckNumber(1);
     float fFarZ = (float)LUA->CheckNumber(2);
@@ -502,32 +531,65 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-#ifdef _WIN32
-    if (g_d3d11Texture == NULL)
+#ifndef _WIN32
+    if (g_sharedTexture == 0 || g_sharedTexture == GL_INVALID_VALUE || !glIsTexture(g_sharedTexture)) {
+        LUA->ThrowError("VRMOD: Invalid shared texture.");
         return 0;
-    IDirect3DQuery9* pEventQuery = nullptr;
-    g_pD3D9Device->CreateQuery(D3DQUERYTYPE_EVENT, &pEventQuery);
-    if (pEventQuery != nullptr)
-    {
-        pEventQuery->Issue(D3DISSUE_END);
-        while (pEventQuery->GetData(nullptr, 0, D3DGETDATA_FLUSH) != S_OK);
-        pEventQuery->Release();
     }
-#else
-    if (g_sharedTexture == GL_INVALID_VALUE || g_sharedTexture == 0)
-        LUA->ThrowError("VRMOD: Invalid shared texture handle");
-    vr::VRCompositor()->Submit(vr::EVREye::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
-    vr::VRCompositor()->Submit(vr::EVREye::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+
+    if (!vr::VRCompositor()) {
+        LUA->ThrowError("VRMOD: VR Compositor is null.");
+        return 0;
+    }
+
+    if (!vr::VRCompositor()->CanRenderScene()) {
+        LuaPrint(LUA, "VRMOD: Submit skipped because compositor does not have focus");
+        return 0;
+    }
+
+    if (g_vrTexture.handle == nullptr) {
+        LUA->ThrowError("VRMOD: VR texture handle is null.");
+        return 0;
+    }
 #endif
+
+    // Set texture type & color space explicitly
+    g_vrTexture.eType = vr::TextureType_OpenGL;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
+
+    GLuint textureID = g_sharedTexture;
+    
+    if (!glIsTexture(textureID)) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "VRMOD: Submit skipped — invalid texture ID (%u)", textureID);
+        LuaPrint(LUA, buf);
+        return 0;
+    }
+
+    vr::EVRCompositorError errLeft = vr::VRCompositor()->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
+    vr::EVRCompositorError errRight = vr::VRCompositor()->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+
+    if (errLeft != vr::VRCompositorError_None || errRight != vr::VRCompositorError_None) {
+        std::string errMsg = "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) + ", Right: " + std::to_string(errRight);
+        LuaPrint(LUA, errMsg.c_str());
+    }
+
     return 0;
 }
 
+
 LUA_FUNCTION(Shutdown) {
+    if (vr::VRCompositor()) {
+        vr::VRCompositor()->ClearLastSubmittedFrame();
+        vr::VRCompositor()->SuspendRendering(true); // Optional but recommended
+    }
+
     if (g_pSystem != NULL) {
         vr::VR_Shutdown();
         g_pSystem = NULL;
     }
 
+    // Clear Lua references
     for (int i = 0; i < g_luaRefCount; i++)
         LUA->ReferenceFree(g_luaRefs[i]);
     g_luaRefCount = 0;
@@ -549,14 +611,29 @@ LUA_FUNCTION(Shutdown) {
     g_pD3D9Device = NULL;
     g_sharedTexture = NULL;
 #else
+    if (pglBindFramebuffer)
+        pglBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     if (g_sharedTexture != GL_INVALID_VALUE && g_sharedTexture != 0) {
         glDeleteTextures(1, &g_sharedTexture);
         g_sharedTexture = GL_INVALID_VALUE;
     }
 #endif
 
+    g_vrTexture.handle = nullptr;
+    g_vrTexture.eType = vr::TextureType_OpenGL;  // Or _D3D11 depending on platform
+    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
+
+    memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
+    memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
+
+
+    LuaPrint(LUA, "VRMOD: Shutdown cleanup complete");
     return 0;
 }
+
 
 LUA_FUNCTION(TriggerHaptic) {
     const char* actionName = LUA->CheckString(1);
