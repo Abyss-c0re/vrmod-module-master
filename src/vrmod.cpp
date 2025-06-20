@@ -131,7 +131,7 @@ LUA_FUNCTION(IsHMDPresent) {
 
 LUA_FUNCTION(Init) {
     if (g_pSystem != NULL)
-        LUA->ThrowError("Already initialized");
+        LUA->ThrowError("VRMOD: Already initialized");
 
     vr::HmdError error = vr::VRInitError_None;
     g_pSystem = vr::VR_Init(&error, vr::VRApplication_Scene);
@@ -139,7 +139,7 @@ LUA_FUNCTION(Init) {
         LUA->ThrowError(vr::VR_GetVRInitErrorAsEnglishDescription(error));
 
     if (!vr::VRCompositor())
-        LUA->ThrowError("VRCompositor failed");
+        LUA->ThrowError("VRMOD: VRCompositor failed");
 
     memset(g_luaRefs, 0, sizeof(g_luaRefs));
     for (int i = 0; i < LuaRefIndex_Max; i++) {
@@ -150,9 +150,9 @@ LUA_FUNCTION(Init) {
 
 #ifdef _WIN32
     HMODULE hMod = GetModuleHandleA("shaderapidx9.dll");
-    if (!hMod) LUA->ThrowError("Missing shaderapidx9.dll");
+    if (!hMod) LUA->ThrowError("VRMOD: Missing shaderapidx9.dll");
     CreateInterfaceFn CreateInterface = (CreateInterfaceFn)GetProcAddress(hMod, "CreateInterface");
-    if (!CreateInterface) LUA->ThrowError("Missing CreateInterface");
+    if (!CreateInterface) LUA->ThrowError("VRMOD: Missing CreateInterface");
 
 # ifdef _WIN64
     DWORD_PTR fnAddr = ((DWORD_PTR**)CreateInterface("ShaderDevice001", NULL))[0][5];
@@ -167,10 +167,10 @@ LUA_FUNCTION(Init) {
 # else
     void *lib = dlopen("libtogl.so", RTLD_NOW | RTLD_NOLOAD);
 # endif
-    if (!lib) LUA->ThrowError("dlopen failed");
+    if (!lib) LUA->ThrowError("VRMOD: dlopen failed");
 
     GetOpenGLEntryPoints_t GetOpenGLEntryPoints = (GetOpenGLEntryPoints_t)dlsym(lib, "GetOpenGLEntryPoints");
-    if (!GetOpenGLEntryPoints) LUA->ThrowError("dlsym failed");
+    if (!GetOpenGLEntryPoints) LUA->ThrowError("VRMOD: dlsym failed");
 
     g_GL = GetOpenGLEntryPoints(NULL);
     dlclose(lib);
@@ -193,16 +193,16 @@ LUA_FUNCTION(SetActionManifest) {
     GetCurrentDirectory(PATH_MAX, currentDir);
 #else
     if(getcwd(currentDir, PATH_MAX) == NULL)
-        LUA->ThrowError("getcwd failed");
+        LUA->ThrowError("VRMOD: getcwd failed");
 #endif
     if (snprintf(path, PATH_MAX, "%s/garrysmod/data/%s", currentDir, fileName) >= PATH_MAX)
-        LUA->ThrowError("SetActionManifest path too long");
+        LUA->ThrowError("VRMOD: SetActionManifest path too long");
     g_pInput = vr::VRInput();
     if (g_pInput->SetActionManifestPath(path) != vr::VRInputError_None)
-        LUA->ThrowError("SetActionManifestPath failed");
+        LUA->ThrowError("VRMOD: SetActionManifestPath failed");
     FILE* file = fopen(path, "r");
     if (file == NULL)
-        LUA->ThrowError("failed to open action manifest");
+        LUA->ThrowError("VRMOD: failed to open action manifest");
     memset(g_actions, 0, sizeof(g_actions));
     char word[MAX_STR_LEN];
     char fmt1[MAX_STR_LEN], fmt2[MAX_STR_LEN];
@@ -433,9 +433,9 @@ LUA_FUNCTION(ShareTextureBegin) {
 
 #ifdef _WIN32
     if (!ReadProcessMemory(GetCurrentProcess(), g_createTexture, g_createTextureOrigBytes, 14, NULL))
-        LUA->ThrowError("ReadProcessMemory failed");
+        LUA->ThrowError("VRMOD: ReadProcessMemory failed");
     if (!WriteProcessMemory(GetCurrentProcess(), g_createTexture, patch, 14, NULL))
-        LUA->ThrowError("WriteProcessMemory failed");
+        LUA->ThrowError("VRMOD: WriteProcessMemory failed");
 #else
     uintptr_t alignedAddr = (uintptr_t)g_createTexture & ~(getpagesize() - 1);
     size_t patchSize = 14;
@@ -445,7 +445,7 @@ LUA_FUNCTION(ShareTextureBegin) {
     size_t length = endPage - startPage;
 
     if (mprotect((void*)startPage, length, PROT_READ | PROT_WRITE | PROT_EXEC) == -1)
-        LUA->ThrowError("mprotect failed");
+        LUA->ThrowError("VRMOD: mprotect failed");
 
     glFinish(); // ensure GL operations complete
     memcpy((void*)g_createTextureOrigBytes, (void*)g_createTexture, 14);
@@ -459,25 +459,25 @@ LUA_FUNCTION(ShareTextureBegin) {
 LUA_FUNCTION(ShareTextureFinish) {
 #ifdef _WIN32
     if (!g_sharedTexture)
-        LUA->ThrowError("g_sharedTexture is null");
+        LUA->ThrowError("VRMOD: g_sharedTexture is null");
 
     if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0,
                                  D3D11_SDK_VERSION, &g_d3d11Device, NULL, NULL)))
-        LUA->ThrowError("D3D11CreateDevice failed");
+        LUA->ThrowError("VRMOD: D3D11CreateDevice failed");
 
     ID3D11Resource* res;
     if (FAILED(g_d3d11Device->OpenSharedResource(g_sharedTexture,
         __uuidof(ID3D11Resource), (void**)&res)))
-        LUA->ThrowError("OpenSharedResource failed");
+        LUA->ThrowError("VRMOD: OpenSharedResource failed");
 
     if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&g_d3d11Texture)))
-        LUA->ThrowError("QueryInterface failed");
+        LUA->ThrowError("VRMOD: QueryInterface failed");
 
     g_vrTexture.handle = g_d3d11Texture;
     g_vrTexture.eType = vr::TextureType_DirectX;
 #else
     if (g_sharedTexture == GL_INVALID_VALUE)
-        LUA->ThrowError("g_sharedTexture is invalid");
+        LUA->ThrowError("VRMOD: g_sharedTexture is invalid");
 
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
@@ -502,28 +502,24 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-    g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
-    g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-
-    vr::EVRCompositorError err;
-
-    err = vr::VRCompositor()->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
-    if (err != vr::VRCompositorError_None) {
-        LUA->PushBool(false);
-        LUA->PushString("Submit to Eye_Left failed");
-        return 2;
+#ifdef _WIN32
+    if (g_d3d11Texture == NULL)
+        return 0;
+    IDirect3DQuery9* pEventQuery = nullptr;
+    g_pD3D9Device->CreateQuery(D3DQUERYTYPE_EVENT, &pEventQuery);
+    if (pEventQuery != nullptr)
+    {
+        pEventQuery->Issue(D3DISSUE_END);
+        while (pEventQuery->GetData(nullptr, 0, D3DGETDATA_FLUSH) != S_OK);
+        pEventQuery->Release();
     }
-
-    err = vr::VRCompositor()->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
-    if (err != vr::VRCompositorError_None) {
-        LUA->PushBool(false);
-        LUA->PushString("Submit to Eye_Right failed");
-        return 2;
-    }
-
-    LUA->PushBool(true);
-    return 1;
+#else
+    if (g_sharedTexture == GL_INVALID_VALUE || g_sharedTexture == 0)
+        LUA->ThrowError("VRMOD: Invalid shared texture handle");
+    vr::VRCompositor()->Submit(vr::EVREye::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
+    vr::VRCompositor()->Submit(vr::EVREye::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+#endif
+    return 0;
 }
 
 LUA_FUNCTION(Shutdown) {
