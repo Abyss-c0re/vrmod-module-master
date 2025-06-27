@@ -86,10 +86,13 @@ typedef struct{
 typedef void *(*GL_GetProcAddressCallbackFunc_t)(const char *, bool &, const bool, void *);
 typedef COpenGLEntryPoints*(*GetOpenGLEntryPoints_t)(GL_GetProcAddressCallbackFunc_t callback);
 typedef void (*glGenTextures_t)(GLsizei n, GLuint *textures);
+uint32_t recommendedWidth = 0;
+uint32_t recommendedHeight = 0;
 
 void*                   g_createTexture = NULL;
 GLuint                  g_sharedTexture = GL_INVALID_VALUE;
 COpenGLEntryPoints*     g_GL = NULL;
+
 
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
@@ -187,13 +190,26 @@ LUA_FUNCTION(Init) {
 # else
     g_createTexture = *((void**)&g_GL->firstFunc + 48);
 # endif
+    g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
         // Create shared OpenGL texture for VR submission
     glGenTextures(1, &g_sharedTexture);
     glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
+
+    // Set wrap modes
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_SRGB8_ALPHA8);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_SRGB8_ALPHA8);
+
+    // Set filtering modes - these must be filtering enums
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); // or GL_NEAREST
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); // or GL_NEAREST
+
+    // Set texture storage - must be done with glTexImage2D
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    GLfloat maxAniso = 0.0f;
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
+
     // Prepare OpenVR texture descriptor
     g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
     g_vrTexture.eType = vr::TextureType_OpenGL;
@@ -287,9 +303,6 @@ LUA_FUNCTION(SetActiveActionSets) {
 LUA_FUNCTION(GetDisplayInfo) {
     float fNearZ = (float)LUA->CheckNumber(1);
     float fFarZ = (float)LUA->CheckNumber(2);
-    uint32_t recommendedWidth = 0;
-    uint32_t recommendedHeight = 0;
-    g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
     vr::HmdMatrix44_t projLeft = g_pSystem->GetProjectionMatrix(vr::Hmd_Eye::Eye_Left, fNearZ, fFarZ);
     vr::HmdMatrix44_t projRight = g_pSystem->GetProjectionMatrix(vr::Hmd_Eye::Eye_Right, fNearZ, fFarZ);
     vr::HmdMatrix34_t transformLeft = g_pSystem->GetEyeToHeadTransform(vr::Eye_Left);
@@ -440,11 +453,9 @@ LUA_FUNCTION(ShareTextureBegin) {
         LUA->ThrowError("VRMOD: mprotect RWX failed");
         return 0;
     }
-    glFlush();
-    std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);
-    glFlush();            
+    
+    std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);      
     std::memcpy(reinterpret_cast<void*>(addr),patch,HOOK_SIZE);
-    glFlush();
 
     return 0;
 }
@@ -456,8 +467,8 @@ LUA_FUNCTION(ShareTextureFinish) {
 
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
-
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+
     return 0;
 }
 
@@ -477,9 +488,11 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 
 LUA_FUNCTION(SubmitSharedTexture) {
 
-    // Set texture type & color space explicitly
-    g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
+    vr::IVRCompositor* compositor = vr::VRCompositor();
+    if (!compositor) {
+        LuaPrint(LUA, "VRMOD: VRCompositor unavailable — skipping submit");
+        return 0;
+    }
 
     GLuint textureID = g_sharedTexture;
     
@@ -512,7 +525,19 @@ LUA_FUNCTION(Shutdown) {
         g_pSystem = NULL;
     }
 
-    // Clear Lua references
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (g_sharedTexture != GL_INVALID_VALUE && g_sharedTexture != 0) {
+        glDeleteTextures(1, &g_sharedTexture);
+        g_createTexture = NULL;
+        g_sharedTexture = GL_INVALID_VALUE;
+        g_vrTexture.handle = nullptr;
+
+    }
+    memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
+    memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
+
+        // Clear Lua references
     for (int i = 0; i < g_luaRefCount; i++) {
         if (g_luaRefs[i] != 0) {
             LUA->ReferenceFree(g_luaRefs[i]);
@@ -532,26 +557,7 @@ LUA_FUNCTION(Shutdown) {
     g_actionCount = 0;
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    if (g_sharedTexture != GL_INVALID_VALUE && g_sharedTexture != 0) {
-        glDeleteTextures(1, &g_sharedTexture);
-        g_sharedTexture = GL_INVALID_VALUE;
-    }
-
-    if (g_vrTexture.handle) {
-        GLuint texHandle = (GLuint)(uintptr_t)g_vrTexture.handle;
-        if (texHandle != 0 && texHandle != GL_INVALID_VALUE) {
-            glDeleteTextures(1, &texHandle);
-        }
-        g_vrTexture.handle = nullptr;
-    }
-    g_vrTexture.eType = vr::TextureType_Invalid;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-
-    memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
-    memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
+    
     LuaPrint(LUA, "VRMOD: Shutdown cleanup complete");
     return 0;
 }
