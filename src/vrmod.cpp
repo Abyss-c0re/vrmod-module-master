@@ -38,8 +38,6 @@ enum ELuaRefIndex{
     LuaRefIndex_ActionTable,
     LuaRefIndex_Max,
 };
-typedef void (APIENTRYP PFNGLBINDFRAMEBUFFERPROC)(GLenum, GLuint);
-static PFNGLBINDFRAMEBUFFERPROC pglBindFramebuffer = NULL;
 
 typedef struct {
     vr::VRActionHandle_t handle;
@@ -177,8 +175,6 @@ LUA_FUNCTION(Init) {
     void *lib = dlopen("libtogl.so", RTLD_NOW | RTLD_NOLOAD);
 # endif
     if (!lib) LUA->ThrowError("VRMOD: dlopen failed");
-
-    pglBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)glXGetProcAddress((const GLubyte *)"glBindFramebuffer");
 
     GetOpenGLEntryPoints_t GetOpenGLEntryPoints = (GetOpenGLEntryPoints_t)dlsym(lib, "GetOpenGLEntryPoints");
     if (!GetOpenGLEntryPoints) LUA->ThrowError("VRMOD: dlsym failed");
@@ -536,9 +532,6 @@ LUA_FUNCTION(Shutdown) {
     g_actionCount = 0;
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
-
-    if (pglBindFramebuffer)
-        pglBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     glBindTexture(GL_TEXTURE_2D, 0);
 
