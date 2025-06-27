@@ -1,31 +1,26 @@
 #include <gmod/Interface.h>
 #include <openvr/openvr.h>
+#include <cstring>
+#include <cstdint>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <shellapi.h>
-#include <d3d9.h>
-#include <d3d11.h>
-#define PATH_MAX MAX_PATH
-#else
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <GL/glx.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <unistd.h>
-#endif
 
 #define MAX_STR_LEN     256
 #define MAX_ACTIONS     64
 #define MAX_ACTIONSETS  16
 #define PI_F            3.141592654f
+
+constexpr size_t HOOK_SIZE = 14;
 
 enum EActionType{
     ActionType_Pose         = 439,
@@ -76,24 +71,6 @@ int                     g_luaRefs[LuaRefIndex_Max];
 int                     g_luaRefCount = 0;
 char                    g_createTextureOrigBytes[14];
 
-#ifdef _WIN32
-typedef HRESULT (APIENTRY* CreateTexture)(IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DTexture9**, HANDLE*);
-CreateTexture           g_createTexture = NULL;
-ID3D11Device*           g_d3d11Device = NULL;
-ID3D11Texture2D*        g_d3d11Texture = NULL;
-HANDLE                  g_sharedTexture = NULL;
-IDirect3DDevice9*       g_pD3D9Device = NULL;
-typedef void*           (*CreateInterfaceFn)(const char* pName, int* pReturnCode);
-
-HRESULT APIENTRY CreateTextureHook(IDirect3DDevice9* pDevice, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DTexture9** tex, HANDLE* shared_handle) {
-    WriteProcessMemory(GetCurrentProcess(), g_createTexture, g_createTextureOrigBytes, 14, NULL);
-    if (g_sharedTexture == NULL) {
-        shared_handle = &g_sharedTexture;
-        pool = D3DPOOL_DEFAULT;
-    }
-    return g_createTexture(pDevice, w, h, levels, usage, format, pool, tex, shared_handle);
-}
-#else
 typedef struct{
     void ClearEntryPoints();
     uint64_t m_nTotalGLCycles, m_nTotalGLCalls;
@@ -116,12 +93,54 @@ void*                   g_createTexture = NULL;
 GLuint                  g_sharedTexture = GL_INVALID_VALUE;
 COpenGLEntryPoints*     g_GL = NULL;
 
+static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
+    uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
+    uint32_t low  = static_cast<uint32_t>(addr & 0xFFFFFFFF);
+    uint32_t high = static_cast<uint32_t>((addr >> 32) & 0xFFFFFFFF);
+
+    // push imm32
+    outPatch[0] = 0x68;
+    std::memcpy(&outPatch[1], &low, sizeof(low));
+
+    // mov dword ptr [rsp+4], imm32
+    outPatch[5] = 0xC7;
+    outPatch[6] = 0x44;
+    outPatch[7] = 0x24;
+    outPatch[8] = 0x04;
+    std::memcpy(&outPatch[9], &high, sizeof(high));
+
+    // ret
+    outPatch[13] = 0xC3;
+}
+
+
 void CreateTextureHook(GLsizei n, GLuint *textures) {
     memcpy((void*)g_createTexture, (void*)g_createTextureOrigBytes, 14);
     ((glGenTextures_t)g_createTexture)(n, textures);
     g_sharedTexture = textures[0];
 }
-#endif
+
+void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int rows, unsigned int cols) {
+    LUA->CreateTable();
+    for (unsigned int row = 0; row < rows; row++) {
+        LUA->PushNumber(row + 1);
+        LUA->CreateTable();
+        for (unsigned int col = 0; col < cols; col++) {
+            LUA->PushNumber(col+1);
+            LUA->PushNumber(mtx[row * cols + col]);
+            LUA->SetTable(-3);
+        }
+        LUA->SetTable(-3);
+    }
+}
+
+void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
+    LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    LUA->GetField(-1, "print");
+    LUA->PushString(msg);
+    LUA->Call(1, 0);
+    LUA->Pop(1);
+}
 
 LUA_FUNCTION(GetVersion) {
     LUA->PushNumber(23);
@@ -152,20 +171,6 @@ LUA_FUNCTION(Init) {
         g_luaRefCount++;
     }
 
-#ifdef _WIN32
-    HMODULE hMod = GetModuleHandleA("shaderapidx9.dll");
-    if (!hMod) LUA->ThrowError("VRMOD: Missing shaderapidx9.dll");
-    CreateInterfaceFn CreateInterface = (CreateInterfaceFn)GetProcAddress(hMod, "CreateInterface");
-    if (!CreateInterface) LUA->ThrowError("VRMOD: Missing CreateInterface");
-
-# ifdef _WIN64
-    DWORD_PTR fnAddr = ((DWORD_PTR**)CreateInterface("ShaderDevice001", NULL))[0][5];
-    g_pD3D9Device = *(IDirect3DDevice9**)(fnAddr + 8 + (*(DWORD_PTR*)(fnAddr + 3) & 0xFFFFFFFF));
-# else
-    g_pD3D9Device = **(IDirect3DDevice9***)(((DWORD_PTR**)CreateInterface("ShaderDevice001", NULL))[0][5] + 2);
-# endif
-    g_createTexture = ((CreateTexture**)g_pD3D9Device)[0][23];
-#else
 # ifdef __x86_64__
     void *lib = dlopen("libtogl_client.so", RTLD_NOW | RTLD_NOLOAD);
 # else
@@ -186,23 +191,17 @@ LUA_FUNCTION(Init) {
 # else
     g_createTexture = *((void**)&g_GL->firstFunc + 48);
 # endif
-    // Create shared OpenGL texture for VR submission
+        // Create shared OpenGL texture for VR submission
     glGenTextures(1, &g_sharedTexture);
     glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-
-    // Allocate empty texture (placeholder size - 1024x1024 RGBA8)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1024, 1024, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_SRGB8_ALPHA8);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_SRGB8_ALPHA8);
     // Prepare OpenVR texture descriptor
     g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
     g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma; // or Auto, depending on your pipeline
-
-#endif
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto; // or Auto, depending on your pipeline
 
     return 0;
 }
@@ -211,12 +210,8 @@ LUA_FUNCTION(SetActionManifest) {
     const char* fileName = LUA->CheckString(1);
     char path[PATH_MAX];
     char currentDir[PATH_MAX];
-#ifdef _WIN32
-    GetCurrentDirectory(PATH_MAX, currentDir);
-#else
     if(getcwd(currentDir, PATH_MAX) == NULL)
         LUA->ThrowError("VRMOD: getcwd failed");
-#endif
     if (snprintf(path, PATH_MAX, "%s/garrysmod/data/%s", currentDir, fileName) >= PATH_MAX)
         LUA->ThrowError("VRMOD: SetActionManifest path too long");
     g_pInput = vr::VRInput();
@@ -293,27 +288,6 @@ LUA_FUNCTION(SetActiveActionSets) {
     return 0;
 }
 
-void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int rows, unsigned int cols) {
-    LUA->CreateTable();
-    for (unsigned int row = 0; row < rows; row++) {
-        LUA->PushNumber(row + 1);
-        LUA->CreateTable();
-        for (unsigned int col = 0; col < cols; col++) {
-            LUA->PushNumber(col+1);
-            LUA->PushNumber(mtx[row * cols + col]);
-            LUA->SetTable(-3);
-        }
-        LUA->SetTable(-3);
-    }
-}
-
-void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
-    LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-    LUA->GetField(-1, "print");
-    LUA->PushString(msg);
-    LUA->Call(1, 0);
-    LUA->Pop(1);
-}
 LUA_FUNCTION(GetDisplayInfo) {
     float fNearZ = (float)LUA->CheckNumber(1);
     float fFarZ = (float)LUA->CheckNumber(2);
@@ -452,65 +426,40 @@ LUA_FUNCTION(GetActions) {
 }
 
 LUA_FUNCTION(ShareTextureBegin) {
-    char patch[] = "\x68\x0\x0\x0\x0\xC3\x44\x24\x04\x0\x0\x0\x0\xC3";
-    *(uint32_t*)(patch + 1) = (uint32_t)((uintptr_t)CreateTextureHook);
+    // 1) Generate our hook patch bytes
+    uint8_t patch[HOOK_SIZE];
+    void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
+    BuildCreateTextureHookPatch(hookAddr, patch);
 
-#if defined _WIN64 || defined __x86_64__
-    patch[5] = '\xC7';
-    *(uint32_t*)(patch + 9) = (uint32_t)((uintptr_t)CreateTextureHook >> 32);
-#endif
+    // 2) Compute the page‐aligned range covering g_createTexture
+    uintptr_t addr       = reinterpret_cast<uintptr_t>(g_createTexture);
+    size_t    pageSize   = getpagesize();
+    uintptr_t startPage  = addr & ~(pageSize - 1);
+    uintptr_t endPage    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+    size_t    length     = endPage - startPage;
 
-#ifdef _WIN32
-    if (!ReadProcessMemory(GetCurrentProcess(), g_createTexture, g_createTextureOrigBytes, 14, NULL))
-        LUA->ThrowError("VRMOD: ReadProcessMemory failed");
-    if (!WriteProcessMemory(GetCurrentProcess(), g_createTexture, patch, 14, NULL))
-        LUA->ThrowError("VRMOD: WriteProcessMemory failed");
-#else
-    uintptr_t alignedAddr = (uintptr_t)g_createTexture & ~(getpagesize() - 1);
-    size_t patchSize = 14;
-    size_t pageSize = getpagesize();
-    uintptr_t startPage = alignedAddr;
-    uintptr_t endPage = ((uintptr_t)g_createTexture + patchSize + pageSize - 1) & ~(pageSize - 1);
-    size_t length = endPage - startPage;
-
-    if (mprotect((void*)startPage, length, PROT_READ | PROT_WRITE | PROT_EXEC) == -1)
-        LUA->ThrowError("VRMOD: mprotect failed");
-
-    glFinish(); // ensure GL operations complete
-    memcpy((void*)g_createTextureOrigBytes, (void*)g_createTexture, 14);
-    memcpy((void*)g_createTexture, patch, 14);
-    glFinish();
-#endif
+    // 3) Make the code page writable+executable
+    if (mprotect(reinterpret_cast<void*>(startPage), length,
+                 PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
+        LUA->ThrowError("VRMOD: mprotect RWX failed");
+        return 0;
+    }
+    glFlush();
+    std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);
+    glFlush();            
+    std::memcpy(reinterpret_cast<void*>(addr),patch,HOOK_SIZE);
+    glFlush();
 
     return 0;
 }
 
 LUA_FUNCTION(ShareTextureFinish) {
-#ifdef _WIN32
-    if (!g_sharedTexture)
-        LUA->ThrowError("VRMOD: g_sharedTexture is null");
 
-    if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0,
-                                 D3D11_SDK_VERSION, &g_d3d11Device, NULL, NULL)))
-        LUA->ThrowError("VRMOD: D3D11CreateDevice failed");
-
-    ID3D11Resource* res;
-    if (FAILED(g_d3d11Device->OpenSharedResource(g_sharedTexture,
-        __uuidof(ID3D11Resource), (void**)&res)))
-        LUA->ThrowError("VRMOD: OpenSharedResource failed");
-
-    if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&g_d3d11Texture)))
-        LUA->ThrowError("VRMOD: QueryInterface failed");
-
-    g_vrTexture.handle = g_d3d11Texture;
-    g_vrTexture.eType = vr::TextureType_DirectX;
-#else
     if (g_sharedTexture == GL_INVALID_VALUE)
         LUA->ThrowError("VRMOD: g_sharedTexture is invalid");
 
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
-#endif
 
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
     return 0;
@@ -531,27 +480,6 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-#ifndef _WIN32
-    if (g_sharedTexture == 0 || g_sharedTexture == GL_INVALID_VALUE || !glIsTexture(g_sharedTexture)) {
-        LUA->ThrowError("VRMOD: Invalid shared texture.");
-        return 0;
-    }
-
-    if (!vr::VRCompositor()) {
-        LUA->ThrowError("VRMOD: VR Compositor is null.");
-        return 0;
-    }
-
-    if (!vr::VRCompositor()->CanRenderScene()) {
-        LuaPrint(LUA, "VRMOD: Submit skipped because compositor does not have focus");
-        return 0;
-    }
-
-    if (g_vrTexture.handle == nullptr) {
-        LUA->ThrowError("VRMOD: VR texture handle is null.");
-        return 0;
-    }
-#endif
 
     // Set texture type & color space explicitly
     g_vrTexture.eType = vr::TextureType_OpenGL;
@@ -609,15 +537,6 @@ LUA_FUNCTION(Shutdown) {
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
 
-#ifdef _WIN32
-    if (g_d3d11Device) {
-        g_d3d11Device->Release();
-        g_d3d11Device = NULL;
-    }
-    g_d3d11Texture = NULL;
-    g_pD3D9Device = NULL;
-    g_sharedTexture = NULL;
-#else
     if (pglBindFramebuffer)
         pglBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -640,13 +559,9 @@ LUA_FUNCTION(Shutdown) {
 
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
-#endif
-
     LuaPrint(LUA, "VRMOD: Shutdown cleanup complete");
     return 0;
 }
-
-
 
 
 LUA_FUNCTION(TriggerHaptic) {
