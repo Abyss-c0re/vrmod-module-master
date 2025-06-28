@@ -1,5 +1,3 @@
-#include <gmod/Interface.h>
-#include <openvr/openvr.h>
 #include <cstring>
 #include <cstdint>
 #include <stdio.h>
@@ -7,13 +5,16 @@
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
+#include <sys/mman.h>
+#include <dlfcn.h>
+#include <unistd.h>
 
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <GL/glx.h>
-#include <sys/mman.h>
-#include <dlfcn.h>
-#include <unistd.h>
+
+#include <gmod/Interface.h>
+#include <openvr/openvr.h>
 
 #define MAX_STR_LEN     256
 #define MAX_ACTIONS     64
@@ -54,6 +55,7 @@ typedef struct {
 
 vr::IVRSystem*          g_pSystem = NULL;
 vr::IVRInput*           g_pInput = NULL;
+vr::IVRCompositor*      g_compositor = nullptr;
 vr::TrackedDevicePose_t g_poses[vr::k_unMaxTrackedDeviceCount];
 actionSet               g_actionSets[MAX_ACTIONSETS];
 int                     g_actionSetCount = 0;
@@ -93,7 +95,6 @@ void*                   g_createTexture = NULL;
 GLuint                  g_sharedTexture = GL_INVALID_VALUE;
 COpenGLEntryPoints*     g_GL = NULL;
 
-
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
     uint32_t low  = static_cast<uint32_t>(addr & 0xFFFFFFFF);
@@ -113,7 +114,6 @@ static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatc
     // ret
     outPatch[13] = 0xC3;
 }
-
 
 void CreateTextureHook(GLsizei n, GLuint *textures) {
     memcpy((void*)g_createTexture, (void*)g_createTextureOrigBytes, 14);
@@ -156,14 +156,13 @@ LUA_FUNCTION(IsHMDPresent) {
 LUA_FUNCTION(Init) {
     if (g_pSystem != NULL)
         LUA->ThrowError("VRMOD: Already initialized");
+    
 
     vr::HmdError error = vr::VRInitError_None;
     g_pSystem = vr::VR_Init(&error, vr::VRApplication_Scene);
     if (error != vr::VRInitError_None)
         LUA->ThrowError(vr::VR_GetVRInitErrorAsEnglishDescription(error));
 
-    if (!vr::VRCompositor())
-        LUA->ThrowError("VRMOD: VRCompositor failed");
 
     memset(g_luaRefs, 0, sizeof(g_luaRefs));
     for (int i = 0; i < LuaRefIndex_Max; i++) {
@@ -213,7 +212,9 @@ LUA_FUNCTION(Init) {
     // Prepare OpenVR texture descriptor
     g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
     g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto; // or Auto, depending on your pipeline
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+
+    g_compositor = vr::VRCompositor();
 
     return 0;
 }
@@ -324,7 +325,7 @@ LUA_FUNCTION(GetDisplayInfo) {
 }
 
 LUA_FUNCTION(UpdatePosesAndActions) {
-    vr::VRCompositor()->WaitGetPoses(g_poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
+    g_compositor->WaitGetPoses(g_poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
     g_pInput->UpdateActionState(g_activeActionSets, sizeof(vr::VRActiveActionSet_t), g_activeActionSetCount);
     return 0;
 }
@@ -488,12 +489,6 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 
 LUA_FUNCTION(SubmitSharedTexture) {
 
-    vr::IVRCompositor* compositor = vr::VRCompositor();
-    if (!compositor) {
-        LuaPrint(LUA, "VRMOD: VRCompositor unavailable — skipping submit");
-        return 0;
-    }
-
     GLuint textureID = g_sharedTexture;
     
     if (!glIsTexture(textureID)) {
@@ -503,8 +498,8 @@ LUA_FUNCTION(SubmitSharedTexture) {
         return 0;
     }
 
-    vr::EVRCompositorError errLeft = vr::VRCompositor()->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
-    vr::EVRCompositorError errRight = vr::VRCompositor()->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+    vr::EVRCompositorError errLeft = g_compositor->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
+    vr::EVRCompositorError errRight = g_compositor->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
 
     if (errLeft != vr::VRCompositorError_None || errRight != vr::VRCompositorError_None) {
         std::string errMsg = "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) + ", Right: " + std::to_string(errRight);
@@ -515,10 +510,11 @@ LUA_FUNCTION(SubmitSharedTexture) {
 }
 
 LUA_FUNCTION(Shutdown) {
-    if (vr::VRCompositor()) {
-        vr::VRCompositor()->ClearLastSubmittedFrame();
-        vr::VRCompositor()->SuspendRendering(true);
-    }
+    if (g_compositor) {
+        g_compositor->ClearLastSubmittedFrame();
+        g_compositor->SuspendRendering(true);
+        g_compositor = nullptr;
+}
 
     if (g_pSystem != NULL) {
         vr::VR_Shutdown();
