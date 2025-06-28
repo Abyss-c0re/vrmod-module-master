@@ -1,7 +1,6 @@
 
 
 mkdir -p "deps/gmod"
-mkdir -p "deps/openvr/lib_linux32"
 mkdir -p "deps/openvr/lib_linux64"
 
 if [ ! -f "deps/gmod/Interface.h" ]; then
@@ -10,13 +9,11 @@ if [ ! -f "deps/gmod/Interface.h" ]; then
     rm deps/gmod/tmp.zip
 fi
 
-if [ ! -f "deps/openvr/lib_linux32/libopenvr_api.so" ]; then
+if [ ! -f "deps/openvr/lib_linux64/libopenvr_api.so" ]; then
     wget -O deps/openvr/openvr.h https://github.com/ValveSoftware/openvr/raw/master/headers/openvr.h
-    wget -O deps/openvr/lib_linux32/libopenvr_api.so https://github.com/ValveSoftware/openvr/raw/master/bin/linux32/libopenvr_api.so
     wget -O deps/openvr/lib_linux64/libopenvr_api.so https://github.com/ValveSoftware/openvr/raw/master/bin/linux64/libopenvr_api.so
 fi
 
-g++ -fPIC -shared -m32 -O3 -I ./deps src/vrmod.cpp -o install/GarrysMod/garrysmod/lua/bin/gmcl_vrmod_linux.dll -L ./deps/openvr/lib_linux32 -l openvr_api -ldl -Wl,-rpath='$ORIGIN'
 g++ -fPIC -shared -m64 -O3 -I ./deps src/vrmod.cpp -o install/GarrysMod/garrysmod/lua/bin/gmcl_vrmod_linux64.dll -L ./deps/openvr/lib_linux64 -l openvr_api -ldl -Wl,-rpath='$ORIGIN'
 
 
