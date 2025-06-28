@@ -53,24 +53,6 @@ typedef struct {
     char name[MAX_STR_LEN];
 } actionSet;
 
-vr::IVRSystem*          g_pSystem = NULL;
-vr::IVRInput*           g_pInput = NULL;
-vr::IVRCompositor*      g_compositor = nullptr;
-vr::TrackedDevicePose_t g_poses[vr::k_unMaxTrackedDeviceCount];
-actionSet               g_actionSets[MAX_ACTIONSETS];
-int                     g_actionSetCount = 0;
-vr::VRActiveActionSet_t g_activeActionSets[MAX_ACTIONSETS];
-int                     g_activeActionSetCount = 0;
-action                  g_actions[MAX_ACTIONS];
-int                     g_actionCount = 0;
-char                    g_errorString[MAX_STR_LEN];
-vr::VRTextureBounds_t   g_textureBoundsLeft;
-vr::VRTextureBounds_t   g_textureBoundsRight;
-vr::Texture_t           g_vrTexture;
-int                     g_luaRefs[LuaRefIndex_Max];
-int                     g_luaRefCount = 0;
-char                    g_createTextureOrigBytes[14];
-
 typedef struct{
     void ClearEntryPoints();
     uint64_t m_nTotalGLCycles, m_nTotalGLCalls;
@@ -88,12 +70,32 @@ typedef struct{
 typedef void *(*GL_GetProcAddressCallbackFunc_t)(const char *, bool &, const bool, void *);
 typedef COpenGLEntryPoints*(*GetOpenGLEntryPoints_t)(GL_GetProcAddressCallbackFunc_t callback);
 typedef void (*glGenTextures_t)(GLsizei n, GLuint *textures);
-uint32_t recommendedWidth = 0;
-uint32_t recommendedHeight = 0;
 
+vr::IVRSystem*          g_pSystem = NULL;
+vr::IVRInput*           g_pInput = NULL;
+vr::IVRCompositor*      g_compositor = nullptr;
+vr::TrackedDevicePose_t g_poses[vr::k_unMaxTrackedDeviceCount];
+actionSet               g_actionSets[MAX_ACTIONSETS];
+int                     g_actionSetCount = 0;
+vr::VRActiveActionSet_t g_activeActionSets[MAX_ACTIONSETS];
+int                     g_activeActionSetCount = 0;
+action                  g_actions[MAX_ACTIONS];
+int                     g_actionCount = 0;
+char                    g_errorString[MAX_STR_LEN];
+char                    g_createTextureOrigBytes[14];
+vr::VRTextureBounds_t   g_textureBoundsLeft;
+vr::VRTextureBounds_t   g_textureBoundsRight;
+vr::Texture_t           g_vrTexture;
 void*                   g_createTexture = NULL;
 GLuint                  g_sharedTexture = GL_INVALID_VALUE;
 COpenGLEntryPoints*     g_GL = NULL;
+static void*            s_HookTarget = nullptr;
+static bool             s_IsPatched  = false;
+uint32_t                recommendedWidth = 0;
+uint32_t                recommendedHeight = 0;
+int                     g_luaRefs[LuaRefIndex_Max];
+int                     g_luaRefCount = 0;
+
 
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
@@ -213,6 +215,7 @@ LUA_FUNCTION(Init) {
     g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
     g_vrTexture.eType = vr::TextureType_OpenGL;
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+    s_HookTarget    = g_createTexture;
 
     g_compositor = vr::VRCompositor();
 
@@ -437,27 +440,29 @@ LUA_FUNCTION(GetActions) {
 
 LUA_FUNCTION(ShareTextureBegin) {
     // 1) Generate our hook patch bytes
-    uint8_t patch[HOOK_SIZE];
-    void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
-    BuildCreateTextureHookPatch(hookAddr, patch);
+    if (!s_IsPatched && s_HookTarget) {
+        uint8_t patch[HOOK_SIZE];
+        void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
+        BuildCreateTextureHookPatch(hookAddr, patch);
 
-    // 2) Compute the page‐aligned range covering g_createTexture
-    uintptr_t addr       = reinterpret_cast<uintptr_t>(g_createTexture);
-    size_t    pageSize   = getpagesize();
-    uintptr_t startPage  = addr & ~(pageSize - 1);
-    uintptr_t endPage    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
-    size_t    length     = endPage - startPage;
+        // 2) Compute the page‐aligned range covering g_createTexture
+        uintptr_t addr       = reinterpret_cast<uintptr_t>(g_createTexture);
+        size_t    pageSize   = getpagesize();
+        uintptr_t startPage  = addr & ~(pageSize - 1);
+        uintptr_t endPage    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+        size_t    length     = endPage - startPage;
 
-    // 3) Make the code page writable+executable
-    if (mprotect(reinterpret_cast<void*>(startPage), length,
-                 PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
-        LUA->ThrowError("VRMOD: mprotect RWX failed");
-        return 0;
+        // 3) Make the code page writable+executable
+        if (mprotect(reinterpret_cast<void*>(startPage), length,
+                    PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
+            LUA->ThrowError("VRMOD: mprotect RWX failed");
+            return 0;
+        }
+        
+        std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);      
+        std::memcpy(reinterpret_cast<void*>(addr),patch,HOOK_SIZE);
     }
-    
-    std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);      
-    std::memcpy(reinterpret_cast<void*>(addr),patch,HOOK_SIZE);
-
+    s_IsPatched = true;
     return 0;
 }
 
@@ -488,6 +493,12 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
+    if (!g_compositor || g_sharedTexture == GL_INVALID_VALUE)
+    
+    {
+        LuaPrint(LUA, "VRMOD: Submit skipped - compositor is not ready");
+        return 0;
+    }
 
     GLuint textureID = g_sharedTexture;
     
@@ -510,6 +521,20 @@ LUA_FUNCTION(SubmitSharedTexture) {
 }
 
 LUA_FUNCTION(Shutdown) {
+     if (s_IsPatched && s_HookTarget) {
+        uintptr_t addr     = reinterpret_cast<uintptr_t>(s_HookTarget);
+        size_t    pageSize = getpagesize();
+        uintptr_t start    = addr & ~(pageSize - 1);
+        uintptr_t end      = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+        size_t    len      = end - start;
+
+        mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC);
+        std::memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
+        mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+
+        s_IsPatched = false;
+    }
+
     if (g_compositor) {
         g_compositor->ClearLastSubmittedFrame();
         g_compositor->SuspendRendering(true);
@@ -527,8 +552,9 @@ LUA_FUNCTION(Shutdown) {
         glDeleteTextures(1, &g_sharedTexture);
         g_createTexture = NULL;
         g_sharedTexture = GL_INVALID_VALUE;
-       
+        s_HookTarget = nullptr;
     }
+
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
     g_vrTexture.handle = nullptr;
