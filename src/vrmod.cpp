@@ -520,20 +520,22 @@ LUA_FUNCTION(Shutdown) {
         vr::VR_Shutdown();
         g_pSystem = NULL;
     }
-
+    
     glBindTexture(GL_TEXTURE_2D, 0);
 
     if (g_sharedTexture != GL_INVALID_VALUE && g_sharedTexture != 0) {
         glDeleteTextures(1, &g_sharedTexture);
         g_createTexture = NULL;
         g_sharedTexture = GL_INVALID_VALUE;
-        g_vrTexture.handle = nullptr;
-
+       
     }
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
+    g_vrTexture.handle = nullptr;
+    g_vrTexture.eType = vr::TextureType_Invalid;        
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
 
-        // Clear Lua references
+    // Clear Lua references
     for (int i = 0; i < g_luaRefCount; i++) {
         if (g_luaRefs[i] != 0) {
             LUA->ReferenceFree(g_luaRefs[i]);
