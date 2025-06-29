@@ -156,15 +156,13 @@ LUA_FUNCTION(IsHMDPresent) {
 }
 
 LUA_FUNCTION(Init) {
-    if (g_pSystem != NULL)
+        if (g_pSystem != nullptr)
         LUA->ThrowError("VRMOD: Already initialized");
-    
 
     vr::HmdError error = vr::VRInitError_None;
     g_pSystem = vr::VR_Init(&error, vr::VRApplication_Scene);
     if (error != vr::VRInitError_None)
         LUA->ThrowError(vr::VR_GetVRInitErrorAsEnglishDescription(error));
-
 
     memset(g_luaRefs, 0, sizeof(g_luaRefs));
     for (int i = 0; i < LuaRefIndex_Max; i++) {
@@ -173,24 +171,17 @@ LUA_FUNCTION(Init) {
         g_luaRefCount++;
     }
 
-# ifdef __x86_64__
-    void *lib = dlopen("libtogl_client.so", RTLD_NOW | RTLD_NOLOAD);
-# else
-    void *lib = dlopen("libtogl.so", RTLD_NOW | RTLD_NOLOAD);
-# endif
+    void* lib = dlopen("libtogl_client.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) LUA->ThrowError("VRMOD: dlopen failed");
 
-    GetOpenGLEntryPoints_t GetOpenGLEntryPoints = (GetOpenGLEntryPoints_t)dlsym(lib, "GetOpenGLEntryPoints");
+    auto GetOpenGLEntryPoints = reinterpret_cast<GetOpenGLEntryPoints_t>(dlsym(lib, "GetOpenGLEntryPoints"));
     if (!GetOpenGLEntryPoints) LUA->ThrowError("VRMOD: dlsym failed");
 
-    g_GL = GetOpenGLEntryPoints(NULL);
+    g_GL = GetOpenGLEntryPoints(nullptr);
     dlclose(lib);
 
-# ifdef __x86_64__
     g_createTexture = *((void**)&g_GL->firstFunc + 50);
-# else
-    g_createTexture = *((void**)&g_GL->firstFunc + 48);
-# endif
+
     g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
         // Create shared OpenGL texture for VR submission
     glGenTextures(1, &g_sharedTexture);
@@ -440,7 +431,8 @@ LUA_FUNCTION(GetActions) {
 
 LUA_FUNCTION(ShareTextureBegin) {
     // 1) Generate our hook patch bytes
-    if (!s_IsPatched && s_HookTarget) {
+   
+        //LuaPrint(LUA, "VRMOD: Patching textures");
         uint8_t patch[HOOK_SIZE];
         void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
         BuildCreateTextureHookPatch(hookAddr, patch);
@@ -455,13 +447,13 @@ LUA_FUNCTION(ShareTextureBegin) {
         // 3) Make the code page writable+executable
         if (mprotect(reinterpret_cast<void*>(startPage), length,
                     PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
-            LUA->ThrowError("VRMOD: mprotect RWX failed");
+            LUA->ThrowError("VRMOD: mprotect RWX failed\n");
             return 0;
         }
         
         std::memcpy(g_createTextureOrigBytes,reinterpret_cast<void*>(addr),HOOK_SIZE);      
         std::memcpy(reinterpret_cast<void*>(addr),patch,HOOK_SIZE);
-    }
+    
     s_IsPatched = true;
     return 0;
 }
@@ -474,6 +466,7 @@ LUA_FUNCTION(ShareTextureFinish) {
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+
 
     return 0;
 }
@@ -493,21 +486,25 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-    if (!g_compositor || g_sharedTexture == GL_INVALID_VALUE)
-    
+
+    if (!g_compositor)
     {
-        LuaPrint(LUA, "VRMOD: Submit skipped - compositor is not ready");
+        LuaPrint(LUA, "VRMOD: Submit skipped - compositor is not ready\n");
+        return 0;
+    }
+    
+    if (!g_vrTexture.handle || g_vrTexture.eType == vr::TextureType_Invalid) 
+    {
+        LuaPrint(LUA, "VRMOD: Attempt to submit invalid texture, skipping\n");
         return 0;
     }
 
-    GLuint textureID = g_sharedTexture;
-    
-    if (!glIsTexture(textureID)) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "VRMOD: Submit skipped — invalid texture ID (%u)", textureID);
-        LuaPrint(LUA, buf);
+    GLuint texID = (GLuint)(uintptr_t)g_vrTexture.handle;
+    if (!glIsTexture(texID)) {
+        LuaPrint(LUA, "VRMOD: Texture handle is no longer a valid OpenGL texture\n.");
         return 0;
     }
+    //LuaPrint(LUA, "VRMOD: Submitting textures");
 
     vr::EVRCompositorError errLeft = g_compositor->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
     vr::EVRCompositorError errRight = g_compositor->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
@@ -516,12 +513,16 @@ LUA_FUNCTION(SubmitSharedTexture) {
         std::string errMsg = "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) + ", Right: " + std::to_string(errRight);
         LuaPrint(LUA, errMsg.c_str());
     }
+    //LuaPrint(LUA, "VRMOD: Texture submitted");
+    g_compositor->PostPresentHandoff();
 
     return 0;
 }
 
 LUA_FUNCTION(Shutdown) {
-     if (s_IsPatched && s_HookTarget) {
+
+    if (s_IsPatched && s_HookTarget) {
+        //LuaPrint(LUA, "VRMOD: Unpatching texture\n");
         uintptr_t addr     = reinterpret_cast<uintptr_t>(s_HookTarget);
         size_t    pageSize = getpagesize();
         uintptr_t start    = addr & ~(pageSize - 1);
@@ -536,31 +537,28 @@ LUA_FUNCTION(Shutdown) {
     }
 
     if (g_compositor) {
-        g_compositor->ClearLastSubmittedFrame();
-        g_compositor->SuspendRendering(true);
-        g_compositor = nullptr;
-}
-
-    if (g_pSystem != NULL) {
+    //LuaPrint(LUA, "VRMOD: Purging compositor\n");
+    g_compositor->SuspendRendering(true);
+    g_compositor->ClearLastSubmittedFrame();
+    
+    }
+    glFlush();
+    
+    if (g_pSystem) {
+        //LuaPrint(LUA, "VRMOD: Shutting down VR\n");
         vr::VR_Shutdown();
-        g_pSystem = NULL;
     }
     
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    if (g_sharedTexture != GL_INVALID_VALUE && g_sharedTexture != 0) {
-        glDeleteTextures(1, &g_sharedTexture);
-        g_createTexture = NULL;
-        g_sharedTexture = GL_INVALID_VALUE;
-        s_HookTarget = nullptr;
-    }
+    if (glIsTexture(g_sharedTexture)) {
+    //LuaPrint(LUA, "VRMOD: Purging textures\n");
+    glDeleteTextures(1, &g_sharedTexture);
+}
 
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
-    g_vrTexture.handle = nullptr;
-    g_vrTexture.eType = vr::TextureType_Invalid;        
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-
+   
     // Clear Lua references
     for (int i = 0; i < g_luaRefCount; i++) {
         if (g_luaRefs[i] != 0) {
@@ -568,8 +566,6 @@ LUA_FUNCTION(Shutdown) {
             g_luaRefs[i] = 0;
         }
     }
-    g_luaRefCount = 0;
-
     for (int i = 0; i < g_actionCount; i++) {
         for (int j = 0; j < 2; j++) {
             if (g_actions[i].luaRefs[j] != 0) {
@@ -578,11 +574,19 @@ LUA_FUNCTION(Shutdown) {
             }
         }
     }
+    
+    g_luaRefCount = 0;
+    g_compositor = nullptr;
+    g_vrTexture.handle = nullptr;
+    g_vrTexture.eType = vr::TextureType_Invalid;        
+    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+    g_sharedTexture = GL_INVALID_VALUE;
     g_actionCount = 0;
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
+    g_pSystem = NULL;
     
-    LuaPrint(LUA, "VRMOD: Shutdown cleanup complete");
+    LuaPrint(LUA, "VRMOD: Shutdown cleanup complete\n");
     return 0;
 }
 
