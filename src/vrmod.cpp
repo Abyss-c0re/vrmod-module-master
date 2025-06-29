@@ -89,7 +89,6 @@ vr::Texture_t           g_vrTexture;
 void*                   g_createTexture = NULL;
 GLuint                  g_sharedTexture = 0;
 COpenGLEntryPoints*     g_GL = NULL;
-static void*            s_HookTarget = nullptr;
 static bool             s_IsPatched  = false;
 uint32_t                recommendedWidth = 0;
 uint32_t                recommendedHeight = 0;
@@ -186,17 +185,16 @@ LUA_FUNCTION(Init) {
         // Create shared OpenGL texture for VR submission
     glGenTextures(1, &g_sharedTexture);
     
-
     // Set wrap modes
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     // Set filtering modes - these must be filtering enums
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); // or GL_NEAREST
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); // or GL_NEAREST
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
 
     // Set texture storage - must be done with glTexImage2D
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth*2, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
     GLfloat maxAniso = 0.0f;
     glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
@@ -206,15 +204,10 @@ LUA_FUNCTION(Init) {
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "VRMOD: OpenGL error after glTexImage2D: %u", err);
+        snprintf(buf, sizeof(buf), "VRMOD: OpenGL error: %u", err);
         LUA->ThrowError(buf);
         return 0;
     }
-    // Prepare OpenVR texture descriptor
-    g_vrTexture.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(g_sharedTexture));
-    g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-    s_HookTarget    = g_createTexture;
 
     g_compositor = vr::VRCompositor();
 
@@ -471,11 +464,9 @@ LUA_FUNCTION(ShareTextureFinish) {
         LUA->ThrowError("VRMOD: Failed to generate shared texture.");
         return 0;
     }
-
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-
 
     return 0;
 }
@@ -532,7 +523,7 @@ LUA_FUNCTION(Shutdown) {
 
     if (s_IsPatched) {
         //LuaPrint(LUA, "VRMOD: Unpatching texture\n");
-        uintptr_t addr     = reinterpret_cast<uintptr_t>(s_HookTarget);
+        uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
         size_t    pageSize = getpagesize();
         uintptr_t start    = addr & ~(pageSize - 1);
         uintptr_t end      = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
