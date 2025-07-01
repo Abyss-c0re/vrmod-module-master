@@ -95,6 +95,13 @@ uint32_t                recommendedHeight = 0;
 int                     g_luaRefs[LuaRefIndex_Max];
 int                     g_luaRefCount = 0;
 
+void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
+    LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    LUA->GetField(-1, "print");
+    LUA->PushString(msg);
+    LUA->Call(1, 0);
+    LUA->Pop(1);
+}
 
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
@@ -122,6 +129,45 @@ void CreateTextureHook(GLsizei n, GLuint *textures) {
     g_sharedTexture = textures[0];
 }
 
+bool RemoveTexturePatch(GarrysMod::Lua::ILuaBase* LUA) {
+    if (!s_IsPatched) {
+        LuaPrint(LUA, "VRMOD: Patch not applied, nothing to remove.");
+        return true;
+    }
+
+    uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
+    size_t    pageSize = getpagesize();
+    uintptr_t start    = addr & ~(pageSize - 1);
+    uintptr_t end      = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+    size_t    len      = end - start;
+
+    if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LuaPrint(LUA, "VRMOD: Failed to set memory protection to RWX for unpatch.");
+        return false;
+    }
+
+    // Restore original bytes
+    std::memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
+
+    // Verify restoration
+    if (std::memcmp((void*)addr, g_createTextureOrigBytes, HOOK_SIZE) != 0) {
+        LuaPrint(LUA, "VRMOD: Failed to verify unpatch — bytes mismatch.");
+        // Still try to set protection back
+        mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+        return false;
+    }
+
+    // Reset memory protection
+    if (mprotect((void*)start, len, PROT_READ | PROT_EXEC) != 0) {
+        LuaPrint(LUA, "VRMOD: Failed to reset memory protection after unpatch.");
+        return false;
+    }
+
+    s_IsPatched = false;
+    LuaPrint(LUA, "VRMOD: Successfully removed texture patch.");
+    return true;
+}
+
 void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int rows, unsigned int cols) {
     LUA->CreateTable();
     for (unsigned int row = 0; row < rows; row++) {
@@ -136,13 +182,6 @@ void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int r
     }
 }
 
-void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
-    LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-    LUA->GetField(-1, "print");
-    LUA->PushString(msg);
-    LUA->Call(1, 0);
-    LUA->Pop(1);
-}
 
 LUA_FUNCTION(GetVersion) {
     LUA->PushNumber(23);
@@ -457,7 +496,6 @@ LUA_FUNCTION(ShareTextureBegin) {
     return 0;
 }
 
-
 LUA_FUNCTION(ShareTextureFinish) {
 
     if (g_sharedTexture == 0 || !glIsTexture(g_sharedTexture)) {
@@ -468,6 +506,10 @@ LUA_FUNCTION(ShareTextureFinish) {
     g_vrTexture.eType = vr::TextureType_OpenGL;
     g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
 
+    if (!RemoveTexturePatch(LUA))
+    {   
+        LUA->ThrowError("VRMOD: Failed to remove the texture path.");
+    }
     return 0;
 }
 
@@ -520,21 +562,6 @@ LUA_FUNCTION(SubmitSharedTexture) {
 }
 
 LUA_FUNCTION(Shutdown) {
-
-    if (s_IsPatched) {
-        //LuaPrint(LUA, "VRMOD: Unpatching texture\n");
-        uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
-        size_t    pageSize = getpagesize();
-        uintptr_t start    = addr & ~(pageSize - 1);
-        uintptr_t end      = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
-        size_t    len      = end - start;
-
-        mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC);
-        std::memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
-        mprotect((void*)start, len, PROT_READ | PROT_EXEC);
-
-        s_IsPatched = false;
-    }
 
     if (g_compositor) {
     //LuaPrint(LUA, "VRMOD: Purging compositor\n");
