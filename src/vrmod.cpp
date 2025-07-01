@@ -103,6 +103,25 @@ void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
     LUA->Pop(1);
 }
 
+void UpdateRecommendedSize() {
+   g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
+    int maxTexSize = 4096;
+
+    uint32_t origWidth = recommendedWidth;
+    uint32_t origHeight = recommendedHeight;
+
+    // Calculate scale factors considering the *combined* width of both eyes
+    float wScale = static_cast<float>(maxTexSize) / (origWidth * 2);
+    float hScale = static_cast<float>(maxTexSize) / origHeight;
+
+    // Choose smallest to keep both width*2 and height inside maxTexSize
+    float scaleFactor = std::min(1.0f, std::min(wScale, hScale));
+
+    // Apply uniform scale to per-eye dimensions
+    recommendedWidth = static_cast<uint32_t>(origWidth * scaleFactor);
+    recommendedHeight = static_cast<uint32_t>(origHeight * scaleFactor);
+}
+
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
     uint32_t low  = static_cast<uint32_t>(addr & 0xFFFFFFFF);
@@ -182,7 +201,6 @@ void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int r
     }
 }
 
-
 LUA_FUNCTION(GetVersion) {
     LUA->PushNumber(23);
     return 1;
@@ -220,26 +238,6 @@ LUA_FUNCTION(Init) {
 
     g_createTexture = *((void**)&g_GL->firstFunc + 50);
 
-    g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
-        // Create shared OpenGL texture for VR submission
-    glGenTextures(1, &g_sharedTexture);
-    
-    // Set wrap modes
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // Set filtering modes - these must be filtering enums
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
-
-    // Set texture storage - must be done with glTexImage2D
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth*2, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-    GLfloat maxAniso = 0.0f;
-    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
-    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
-
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
         char buf[128];
@@ -249,7 +247,7 @@ LUA_FUNCTION(Init) {
     }
 
     g_compositor = vr::VRCompositor();
-
+    
     return 0;
 }
 
@@ -336,6 +334,7 @@ LUA_FUNCTION(SetActiveActionSets) {
 }
 
 LUA_FUNCTION(GetDisplayInfo) {
+    UpdateRecommendedSize();
     float fNearZ = (float)LUA->CheckNumber(1);
     float fFarZ = (float)LUA->CheckNumber(2);
     vr::HmdMatrix44_t projLeft = g_pSystem->GetProjectionMatrix(vr::Hmd_Eye::Eye_Left, fNearZ, fFarZ);
@@ -356,6 +355,7 @@ LUA_FUNCTION(GetDisplayInfo) {
     LUA->PushNumber(recommendedHeight);
     LUA->SetField(-2, "RecommendedHeight");
     return 1;
+    
 }
 
 LUA_FUNCTION(UpdatePosesAndActions) {
@@ -470,6 +470,25 @@ LUA_FUNCTION(GetActions) {
 }
 
 LUA_FUNCTION(ShareTextureBegin) {
+            // Create shared OpenGL texture for VR submission
+    glGenTextures(1, &g_sharedTexture);
+    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
+    
+    // Set wrap modes
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // Set filtering modes - these must be filtering enums
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
+
+    // Set texture storage - must be done with glTexImage2D
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    GLfloat maxAniso = 0.0f;
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
+
     if (s_IsPatched)
         return 0;
 
@@ -497,7 +516,7 @@ LUA_FUNCTION(ShareTextureBegin) {
 }
 
 LUA_FUNCTION(ShareTextureFinish) {
-
+    
     if (g_sharedTexture == 0 || !glIsTexture(g_sharedTexture)) {
         LUA->ThrowError("VRMOD: Failed to generate shared texture.");
         return 0;
@@ -510,6 +529,8 @@ LUA_FUNCTION(ShareTextureFinish) {
     {   
         LUA->ThrowError("VRMOD: Failed to remove the texture path.");
     }
+    
+
     return 0;
 }
 
@@ -528,26 +549,6 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-
-    if (!g_compositor)
-    {
-        LuaPrint(LUA, "VRMOD: Submit skipped - compositor is not ready\n");
-        return 0;
-    }
-    
-    if (!g_vrTexture.handle || g_vrTexture.eType == vr::TextureType_Invalid) 
-    {
-        LuaPrint(LUA, "VRMOD: Attempt to submit invalid texture, skipping\n");
-        return 0;
-    }
-
-    GLuint texID = (GLuint)(uintptr_t)g_vrTexture.handle;
-    if (!glIsTexture(texID)) {
-        LuaPrint(LUA, "VRMOD: Texture handle is no longer a valid OpenGL texture\n.");
-        return 0;
-    }
-    //LuaPrint(LUA, "VRMOD: Submitting textures");
-
     vr::EVRCompositorError errLeft = g_compositor->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
     vr::EVRCompositorError errRight = g_compositor->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
 
@@ -555,14 +556,12 @@ LUA_FUNCTION(SubmitSharedTexture) {
         std::string errMsg = "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) + ", Right: " + std::to_string(errRight);
         LuaPrint(LUA, errMsg.c_str());
     }
-    //LuaPrint(LUA, "VRMOD: Texture submitted");
     g_compositor->PostPresentHandoff();
 
     return 0;
 }
 
 LUA_FUNCTION(Shutdown) {
-
     if (g_compositor) {
     //LuaPrint(LUA, "VRMOD: Purging compositor\n");
     g_compositor->SuspendRendering(true);
@@ -581,8 +580,7 @@ LUA_FUNCTION(Shutdown) {
     if (glIsTexture(g_sharedTexture)) {
     //LuaPrint(LUA, "VRMOD: Purging textures\n");
     glDeleteTextures(1, &g_sharedTexture);
-}
-
+    }
     memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
     memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
    
