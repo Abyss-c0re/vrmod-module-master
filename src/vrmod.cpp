@@ -483,7 +483,8 @@ LUA_FUNCTION(ShareTextureBegin) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
 
     // Set texture storage - must be done with glTexImage2D
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glViewport(0, 0 ,recommendedWidth, recommendedHeight);
 
     GLfloat maxAniso = 0.0f;
     glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
