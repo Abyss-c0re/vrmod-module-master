@@ -212,8 +212,26 @@ LUA_FUNCTION(IsHMDPresent) {
 }
 
 LUA_FUNCTION(Init) {
-        if (g_pSystem != nullptr)
-        LUA->ThrowError("VRMOD: Already initialized");
+        if (g_pSystem != nullptr) {
+            if (g_compositor)
+            LUA->CreateTable();
+            g_luaRefs[LuaRefIndex_PoseTable] = LUA->ReferenceCreate();
+
+            // Empty table
+            LUA->CreateTable();
+            g_luaRefs[LuaRefIndex_EmptyTable] = LUA->ReferenceCreate();
+
+            // Action table
+            LUA->CreateTable();
+            g_luaRefs[LuaRefIndex_ActionTable] = LUA->ReferenceCreate();
+
+            // You can create HMD pose table too if needed:
+            LUA->CreateTable();
+            g_luaRefs[LuaRefIndex_HmdPose] = LUA->ReferenceCreate();
+      
+            return 0;
+        }
+        //LUA->ThrowError("VRMOD: Already initialized");
 
     vr::HmdError error = vr::VRInitError_None;
     g_pSystem = vr::VR_Init(&error, vr::VRApplication_Scene);
@@ -247,6 +265,7 @@ LUA_FUNCTION(Init) {
     }
 
     g_compositor = vr::VRCompositor();
+    g_pInput = vr::VRInput();
     
     return 0;
 }
@@ -259,7 +278,7 @@ LUA_FUNCTION(SetActionManifest) {
         LUA->ThrowError("VRMOD: getcwd failed");
     if (snprintf(path, PATH_MAX, "%s/garrysmod/data/%s", currentDir, fileName) >= PATH_MAX)
         LUA->ThrowError("VRMOD: SetActionManifest path too long");
-    g_pInput = vr::VRInput();
+    
     if (g_pInput->SetActionManifestPath(path) != vr::VRInputError_None)
         LUA->ThrowError("VRMOD: SetActionManifestPath failed");
     FILE* file = fopen(path, "r");
@@ -470,25 +489,24 @@ LUA_FUNCTION(GetActions) {
 }
 
 LUA_FUNCTION(ShareTextureBegin) {
-            // Create shared OpenGL texture for VR submission
+    if (glIsTexture(g_sharedTexture)) {
+        glDeleteTextures(1, &g_sharedTexture);
+        g_sharedTexture = 0;
+        memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
+        memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
+        g_vrTexture.handle = nullptr;
+        g_vrTexture.eType = vr::TextureType_Invalid;
+        g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+        glFlush();
+    }    
     glGenTextures(1, &g_sharedTexture);
     glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
-    
-    // Set wrap modes
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // Set filtering modes - these must be filtering enums
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
-
-    // Set texture storage - must be done with glTexImage2D
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glViewport(0, 0 ,recommendedWidth, recommendedHeight);
-
-    GLfloat maxAniso = 0.0f;
-    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1.0f);
 
     if (s_IsPatched)
         return 0;
@@ -505,7 +523,7 @@ LUA_FUNCTION(ShareTextureBegin) {
 
     if (mprotect(reinterpret_cast<void*>(startPage), length,
                  PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
-        LUA->ThrowError("VRMOD: mprotect RWX failed\n");
+        LUA->ThrowError("VRMOD: mprotect RWX failed");
         return 0;
     }
 
@@ -513,6 +531,8 @@ LUA_FUNCTION(ShareTextureBegin) {
     std::memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
 
     s_IsPatched = true;
+    LuaPrint(LUA, "VRMOD: Successfully applied texture patch.");
+
     return 0;
 }
 
@@ -564,28 +584,13 @@ LUA_FUNCTION(SubmitSharedTexture) {
 
 LUA_FUNCTION(Shutdown) {
     if (g_compositor) {
-    //LuaPrint(LUA, "VRMOD: Purging compositor\n");
-    g_compositor->SuspendRendering(true);
     g_compositor->ClearLastSubmittedFrame();
     
     }
     glFlush();
+    glFinish();
     
-    if (g_pSystem) {
-        //LuaPrint(LUA, "VRMOD: Shutting down VR\n");
-        vr::VR_Shutdown();
-    }
-    
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    if (glIsTexture(g_sharedTexture)) {
-    //LuaPrint(LUA, "VRMOD: Purging textures\n");
-    glDeleteTextures(1, &g_sharedTexture);
-    }
-    memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
-    memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
-   
-    // Clear Lua references
+    //Clear Lua references
     for (int i = 0; i < g_luaRefCount; i++) {
         if (g_luaRefs[i] != 0) {
             LUA->ReferenceFree(g_luaRefs[i]);
@@ -600,16 +605,11 @@ LUA_FUNCTION(Shutdown) {
             }
         }
     }
-    g_luaRefCount = 0;
-    g_compositor = nullptr;
-    g_vrTexture.handle = nullptr;
-    g_vrTexture.eType = vr::TextureType_Invalid;        
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
-    g_sharedTexture = 0;
+    g_luaRefCount =  LuaRefIndex_Max;
     g_actionCount = 0;
+    memset(g_actions, 0, sizeof(g_actions));
     g_actionSetCount = 0;
     g_activeActionSetCount = 0;
-    g_pSystem = NULL;
     
     LuaPrint(LUA, "VRMOD: Shutdown cleanup complete\n");
     return 0;
