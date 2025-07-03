@@ -94,6 +94,7 @@ uint32_t                recommendedWidth = 0;
 uint32_t                recommendedHeight = 0;
 int                     g_luaRefs[LuaRefIndex_Max];
 int                     g_luaRefCount = 0;
+static bool             g_IsPaused  = false;
 
 void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
     LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
@@ -110,14 +111,11 @@ void UpdateRecommendedSize() {
     uint32_t origWidth = recommendedWidth;
     uint32_t origHeight = recommendedHeight;
 
-    // Calculate scale factors considering the *combined* width of both eyes
     float wScale = static_cast<float>(maxTexSize) / (origWidth * 2);
     float hScale = static_cast<float>(maxTexSize) / origHeight;
 
-    // Choose smallest to keep both width*2 and height inside maxTexSize
     float scaleFactor = std::min(1.0f, std::min(wScale, hScale));
 
-    // Apply uniform scale to per-eye dimensions
     recommendedWidth = static_cast<uint32_t>(origWidth * scaleFactor);
     recommendedHeight = static_cast<uint32_t>(origHeight * scaleFactor);
 }
@@ -161,7 +159,7 @@ bool RemoveTexturePatch(GarrysMod::Lua::ILuaBase* LUA) {
     size_t    len      = end - start;
 
     if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LuaPrint(LUA, "VRMOD: Failed to set memory protection to RWX for unpatch.");
+        LUA->ThrowError("VRMOD: Failed to set memory protection to RWX for unpatch.");
         return false;
     }
 
@@ -170,7 +168,7 @@ bool RemoveTexturePatch(GarrysMod::Lua::ILuaBase* LUA) {
 
     // Verify restoration
     if (std::memcmp((void*)addr, g_createTextureOrigBytes, HOOK_SIZE) != 0) {
-        LuaPrint(LUA, "VRMOD: Failed to verify unpatch — bytes mismatch.");
+        LUA->ThrowError("VRMOD: Failed to verify unpatch — bytes mismatch.");
         // Still try to set protection back
         mprotect((void*)start, len, PROT_READ | PROT_EXEC);
         return false;
@@ -178,12 +176,11 @@ bool RemoveTexturePatch(GarrysMod::Lua::ILuaBase* LUA) {
 
     // Reset memory protection
     if (mprotect((void*)start, len, PROT_READ | PROT_EXEC) != 0) {
-        LuaPrint(LUA, "VRMOD: Failed to reset memory protection after unpatch.");
+        LUA->ThrowError("VRMOD: Failed to reset memory protection after unpatch.");
         return false;
     }
 
     s_IsPatched = false;
-    LuaPrint(LUA, "VRMOD: Successfully removed texture patch.");
     return true;
 }
 
@@ -213,26 +210,24 @@ LUA_FUNCTION(IsHMDPresent) {
 
 LUA_FUNCTION(Init) {
         if (g_pSystem != nullptr) {
-            if (g_compositor)
-            LUA->CreateTable();
-            g_luaRefs[LuaRefIndex_PoseTable] = LUA->ReferenceCreate();
+            if (g_IsPaused)
+                {
+                LUA->CreateTable();
+                g_luaRefs[LuaRefIndex_PoseTable] = LUA->ReferenceCreate();
 
-            // Empty table
-            LUA->CreateTable();
-            g_luaRefs[LuaRefIndex_EmptyTable] = LUA->ReferenceCreate();
+                LUA->CreateTable();
+                g_luaRefs[LuaRefIndex_EmptyTable] = LUA->ReferenceCreate();
 
-            // Action table
-            LUA->CreateTable();
-            g_luaRefs[LuaRefIndex_ActionTable] = LUA->ReferenceCreate();
+                LUA->CreateTable();
+                g_luaRefs[LuaRefIndex_ActionTable] = LUA->ReferenceCreate();
 
-            // You can create HMD pose table too if needed:
-            LUA->CreateTable();
-            g_luaRefs[LuaRefIndex_HmdPose] = LUA->ReferenceCreate();
-      
-            return 0;
+                LUA->CreateTable();
+                g_luaRefs[LuaRefIndex_HmdPose] = LUA->ReferenceCreate();
+                g_IsPaused = false;
+                return 0;
+            }
+            
         }
-        //LUA->ThrowError("VRMOD: Already initialized");
-
     vr::HmdError error = vr::VRInitError_None;
     g_pSystem = vr::VR_Init(&error, vr::VRApplication_Scene);
     if (error != vr::VRInitError_None)
@@ -506,7 +501,6 @@ LUA_FUNCTION(ShareTextureBegin) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1.0f);
 
     if (s_IsPatched)
         return 0;
@@ -531,8 +525,7 @@ LUA_FUNCTION(ShareTextureBegin) {
     std::memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
 
     s_IsPatched = true;
-    LuaPrint(LUA, "VRMOD: Successfully applied texture patch.");
-
+    
     return 0;
 }
 
@@ -551,7 +544,6 @@ LUA_FUNCTION(ShareTextureFinish) {
         LUA->ThrowError("VRMOD: Failed to remove the texture path.");
     }
     
-
     return 0;
 }
 
@@ -583,35 +575,37 @@ LUA_FUNCTION(SubmitSharedTexture) {
 }
 
 LUA_FUNCTION(Shutdown) {
+    if(!g_compositor)
+        return 0;
+    if(g_IsPaused)
+        return 0;
     if (g_compositor) {
-    g_compositor->ClearLastSubmittedFrame();
+        g_compositor->ClearLastSubmittedFrame();
+        glFlush();
+        glFinish();
     
-    }
-    glFlush();
-    glFinish();
-    
-    //Clear Lua references
-    for (int i = 0; i < g_luaRefCount; i++) {
-        if (g_luaRefs[i] != 0) {
-            LUA->ReferenceFree(g_luaRefs[i]);
-            g_luaRefs[i] = 0;
-        }
-    }
-    for (int i = 0; i < g_actionCount; i++) {
-        for (int j = 0; j < 2; j++) {
-            if (g_actions[i].luaRefs[j] != 0) {
-                LUA->ReferenceFree(g_actions[i].luaRefs[j]);
-                g_actions[i].luaRefs[j] = 0;
+        for (int i = 0; i < g_luaRefCount; i++) {
+            if (g_luaRefs[i] != 0) {
+                LUA->ReferenceFree(g_luaRefs[i]);
+                g_luaRefs[i] = 0;
             }
         }
+        for (int i = 0; i < g_actionCount; i++) {
+            for (int j = 0; j < 2; j++) {
+                if (g_actions[i].luaRefs[j] != 0) {
+                    LUA->ReferenceFree(g_actions[i].luaRefs[j]);
+                    g_actions[i].luaRefs[j] = 0;
+                }
+            }
+        }
+        g_luaRefCount =  LuaRefIndex_Max;
+        g_actionCount = 0;
+        memset(g_actions, 0, sizeof(g_actions));
+        g_actionSetCount = 0;
+        g_activeActionSetCount = 0;
+        g_IsPaused = true;
+        
     }
-    g_luaRefCount =  LuaRefIndex_Max;
-    g_actionCount = 0;
-    memset(g_actions, 0, sizeof(g_actions));
-    g_actionSetCount = 0;
-    g_activeActionSetCount = 0;
-    
-    LuaPrint(LUA, "VRMOD: Shutdown cleanup complete\n");
     return 0;
 }
 
