@@ -1,3 +1,4 @@
+#include <vector>
 #include <cstring>
 #include <cstdint>
 #include <stdio.h>
@@ -95,6 +96,7 @@ uint32_t                recommendedHeight = 0;
 int                     g_luaRefs[LuaRefIndex_Max];
 int                     g_luaRefCount = 0;
 static bool             g_IsPaused  = false;
+
 
 void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
     LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
@@ -484,50 +486,91 @@ LUA_FUNCTION(GetActions) {
 }
 
 LUA_FUNCTION(ShareTextureBegin) {
+    // Tear down previous
     if (glIsTexture(g_sharedTexture)) {
         glDeleteTextures(1, &g_sharedTexture);
         g_sharedTexture = 0;
-        memset(&g_textureBoundsLeft, 0, sizeof(vr::VRTextureBounds_t));
-        memset(&g_textureBoundsRight, 0, sizeof(vr::VRTextureBounds_t));
-        g_vrTexture.handle = nullptr;
-        g_vrTexture.eType = vr::TextureType_Invalid;
-        g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+        memset(&g_textureBoundsLeft,  0, sizeof(g_textureBoundsLeft));
+        memset(&g_textureBoundsRight, 0, sizeof(g_textureBoundsRight));
+        g_vrTexture = { nullptr, vr::TextureType_Invalid, vr::ColorSpace_Auto };
         glFlush();
-    }    
+    }
+
+    // Generate & bind new texture
     glGenTextures(1, &g_sharedTexture);
     glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // Allocate storage (RGBA8) – contents undefined until we clear
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,                  // mip level
+                 GL_RGBA8,           // internal format
+                 recommendedWidth,
+                 recommendedHeight,
+                 0,                  // border
+                 GL_RGBA,            // format
+                 GL_UNSIGNED_BYTE,   // type
+                 nullptr);           // no initial data
+
+    // Clamp to transparent border + linear filtering
+    GLfloat borderColor[4] = {0,0,0,0};
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, recommendedWidth, recommendedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
+    // Manually clear every row to zero (pure GL1.1)
+    {
+        const int w = recommendedWidth;
+        std::vector<GLubyte> zeroRow(w * 4, 0);
+        for (int y = 0; y < recommendedHeight; ++y) {
+            glTexSubImage2D(GL_TEXTURE_2D,
+                            0,
+                            0, y,        // x, y
+                            w, 1,        // width, height=1
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            zeroRow.data());
+        }
+    }
+
+    // Unbind so Submit can re-bind if needed
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Hook‑patch logic unchanged
     if (s_IsPatched)
         return 0;
 
     uint8_t patch[HOOK_SIZE];
-    void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
+    void*    hookAddr = reinterpret_cast<void*>(
+                           reinterpret_cast<uintptr_t>(CreateTextureHook));
     BuildCreateTextureHookPatch(hookAddr, patch);
 
-    uintptr_t addr       = reinterpret_cast<uintptr_t>(g_createTexture);
-    size_t    pageSize   = getpagesize();
-    uintptr_t startPage  = addr & ~(pageSize - 1);
-    uintptr_t endPage    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
-    size_t    length     = endPage - startPage;
+    uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
+    size_t    pageSize = getpagesize();
+    uintptr_t startPg  = addr & ~(pageSize - 1);
+    uintptr_t endPg    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+    size_t    length   = endPg - startPg;
 
-    if (mprotect(reinterpret_cast<void*>(startPage), length,
-                 PROT_READ | PROT_WRITE | PROT_EXEC) == -1) {
+    if (mprotect(reinterpret_cast<void*>(startPg),
+                 length,
+                 PROT_READ|PROT_WRITE|PROT_EXEC) == -1) {
         LUA->ThrowError("VRMOD: mprotect RWX failed");
         return 0;
     }
 
-    std::memcpy(g_createTextureOrigBytes, reinterpret_cast<void*>(addr), HOOK_SIZE);
-    std::memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
+    memcpy(g_createTextureOrigBytes,
+           reinterpret_cast<void*>(addr),
+           HOOK_SIZE);
+    memcpy(reinterpret_cast<void*>(addr),
+           patch,
+           HOOK_SIZE);
 
     s_IsPatched = true;
-    
     return 0;
 }
+
+
 
 LUA_FUNCTION(ShareTextureFinish) {
     
@@ -537,7 +580,7 @@ LUA_FUNCTION(ShareTextureFinish) {
     }
     g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
     g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Auto;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
 
     if (!RemoveTexturePatch(LUA))
     {   
