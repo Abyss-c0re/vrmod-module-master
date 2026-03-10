@@ -107,19 +107,23 @@ void LuaPrint(GarrysMod::Lua::ILuaBase* LUA, const char* msg) {
 }
 
 void UpdateRecommendedSize() {
-   g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
-    int maxTexSize = 4096;
 
-    uint32_t origWidth = recommendedWidth;
-    uint32_t origHeight = recommendedHeight;
+    g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
 
-    float wScale = static_cast<float>(maxTexSize) / (origWidth * 2);
-    float hScale = static_cast<float>(maxTexSize) / origHeight;
+    const int maxTexSize = 4096;
+
+    uint32_t eyeWidth = recommendedWidth;
+    uint32_t eyeHeight = recommendedHeight;
+
+    uint32_t totalWidth = eyeWidth * 2;
+
+    float wScale = (float)maxTexSize / totalWidth;
+    float hScale = (float)maxTexSize / eyeHeight;
 
     float scaleFactor = std::min(1.0f, std::min(wScale, hScale));
 
-    recommendedWidth = static_cast<uint32_t>(origWidth * scaleFactor);
-    recommendedHeight = static_cast<uint32_t>(origHeight * scaleFactor);
+    recommendedWidth = (uint32_t)(eyeWidth * scaleFactor);
+    recommendedHeight = (uint32_t)(eyeHeight * scaleFactor);
 }
 
 static void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
@@ -499,43 +503,31 @@ LUA_FUNCTION(ShareTextureBegin) {
     // Generate & bind new texture
     glGenTextures(1, &g_sharedTexture);
     glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
     // Allocate storage (RGBA8) – contents undefined until we clear
-    glTexImage2D(GL_TEXTURE_2D,
-                 0,                  // mip level
-                 GL_RGBA8,           // internal format
-                 recommendedWidth,
-                 recommendedHeight,
-                 0,                  // border
-                 GL_RGBA,            // format
-                 GL_UNSIGNED_BYTE,   // type
-                 nullptr);           // no initial data
+    glTexImage2D(
+    GL_TEXTURE_2D,
+    0,
+    GL_RGBA8,
+    recommendedWidth * 2,
+    recommendedHeight,
+    0,
+    GL_RGBA,
+    GL_UNSIGNED_BYTE,
+    nullptr
+);
 
     // Clamp to transparent border + linear filtering
     GLfloat borderColor[4] = {0,0,0,0};
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    // Manually clear every row to zero (pure GL1.1)
-    {
-        const int w = recommendedWidth;
-        std::vector<GLubyte> zeroRow(w * 4, 0);
-        for (int y = 0; y < recommendedHeight; ++y) {
-            glTexSubImage2D(GL_TEXTURE_2D,
-                            0,
-                            0, y,        // x, y
-                            w, 1,        // width, height=1
-                            GL_RGBA,
-                            GL_UNSIGNED_BYTE,
-                            zeroRow.data());
-        }
-    }
-
-    // Unbind so Submit can re-bind if needed
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
 
     // Hook‑patch logic unchanged
     if (s_IsPatched)
@@ -604,17 +596,24 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
     return 0;
 }
 
-LUA_FUNCTION(SubmitSharedTexture) {
-    vr::EVRCompositorError errLeft = g_compositor->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft);
-    vr::EVRCompositorError errRight = g_compositor->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight);
+LUA_FUNCTION(SubmitSharedTexture)
+{
+    vr::EVRCompositorError errLeft =
+        g_compositor->Submit(vr::Eye_Left, &g_vrTexture, &g_textureBoundsLeft, vr::Submit_Default);
 
-    if (errLeft != vr::VRCompositorError_None || errRight != vr::VRCompositorError_None) {
-        std::string errMsg = "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) + ", Right: " + std::to_string(errRight);
+    vr::EVRCompositorError errRight =
+        g_compositor->Submit(vr::Eye_Right, &g_vrTexture, &g_textureBoundsRight, vr::Submit_Default);
+
+    if (errLeft != vr::VRCompositorError_None || errRight != vr::VRCompositorError_None)
+    {
+        std::string errMsg =
+            "VRMOD: OpenVR Submit failed: Left: " + std::to_string(errLeft) +
+            ", Right: " + std::to_string(errRight);
         LuaPrint(LUA, errMsg.c_str());
     }
     g_compositor->PostPresentHandoff();
-
     return 0;
+
 }
 
 LUA_FUNCTION(Shutdown) {
