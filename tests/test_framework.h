@@ -1,59 +1,58 @@
-#ifndef VRMOD_TEST_FRAMEWORK_H
-#define VRMOD_TEST_FRAMEWORK_H
-
+#pragma once
 #include <cstdio>
-#include <cmath>
 #include <cstring>
+#include <cmath>
 
-namespace vrmod_test {
-    inline int g_pass = 0;
-    inline int g_fail = 0;
-    inline int g_test_count = 0;
-}
+extern int g_testsPassed;
+extern int g_testsFailed;
+extern int g_currentTestFailed;
 
-#define TEST_ASSERT(cond) do { \
+#define BEGIN_TEST(name) \
+    do { \
+        printf("  [TEST] %-44s ", #name); \
+        g_currentTestFailed = 0;
+
+#define END_TEST() \
+        if (!g_currentTestFailed) { printf("PASS\n"); g_testsPassed++; } \
+    } while(0)
+
+#define ASSERT_TRUE(cond) do { \
     if (!(cond)) { \
-        fprintf(stderr, "    FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-        vrmod_test::g_fail++; \
-    } else { \
-        vrmod_test::g_pass++; \
+        if (!g_currentTestFailed) printf("FAIL\n"); \
+        printf("    Assert: %s at %s:%d\n", #cond, __FILE__, __LINE__); \
+        g_testsFailed++; g_currentTestFailed = 1; \
     } \
 } while(0)
 
-#define TEST_ASSERT_FLOAT_EQ(a, b) do { \
-    float _a = (a), _b = (b); \
-    if (fabsf(_a - _b) > 1e-4f) { \
-        fprintf(stderr, "    FAIL %s:%d: %.6f != %.6f\n", __FILE__, __LINE__, _a, _b); \
-        vrmod_test::g_fail++; \
-    } else { \
-        vrmod_test::g_pass++; \
+#define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
+
+#define ASSERT_EQ(a, b) do { \
+    if ((a) != (b)) { \
+        if (!g_currentTestFailed) printf("FAIL\n"); \
+        printf("    %s != %s at %s:%d\n", #a, #b, __FILE__, __LINE__); \
+        g_testsFailed++; g_currentTestFailed = 1; \
     } \
 } while(0)
 
-#define TEST_ASSERT_STR_EQ(a, b) do { \
+#define ASSERT_STREQ(a, b) do { \
     if (strcmp((a), (b)) != 0) { \
-        fprintf(stderr, "    FAIL %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
-        vrmod_test::g_fail++; \
-    } else { \
-        vrmod_test::g_pass++; \
+        if (!g_currentTestFailed) printf("FAIL\n"); \
+        printf("    \"%s\" != \"%s\" at %s:%d\n", (a), (b), __FILE__, __LINE__); \
+        g_testsFailed++; g_currentTestFailed = 1; \
     } \
 } while(0)
 
-#define RUN_TEST(fn) do { \
-    vrmod_test::g_test_count++; \
-    int _before_fail = vrmod_test::g_fail; \
-    fprintf(stderr, "  [%d] %s ... ", vrmod_test::g_test_count, #fn); \
-    fn(); \
-    if (vrmod_test::g_fail == _before_fail) fprintf(stderr, "OK\n"); \
-    else fprintf(stderr, "\n"); \
+#define ASSERT_NEAR(a, b, eps) do { \
+    if (fabs((double)(a) - (double)(b)) > (eps)) { \
+        if (!g_currentTestFailed) printf("FAIL\n"); \
+        printf("    |%g - %g| > %g at %s:%d\n", (double)(a), (double)(b), (double)(eps), __FILE__, __LINE__); \
+        g_testsFailed++; g_currentTestFailed = 1; \
+    } \
 } while(0)
 
-#define TEST_SUITE(name) fprintf(stderr, "\n=== %s ===\n", name)
-
-#define TEST_SUMMARY() do { \
-    fprintf(stderr, "\n--- Results: %d passed, %d failed, %d tests ---\n", \
-            vrmod_test::g_pass, vrmod_test::g_fail, vrmod_test::g_test_count); \
-    return vrmod_test::g_fail > 0 ? 1 : 0; \
-} while(0)
-
-#endif
+inline int test_report() {
+    printf("\n========================================\n");
+    printf("Results: %d passed, %d failed\n", g_testsPassed, g_testsFailed);
+    printf("========================================\n");
+    return g_testsFailed > 0 ? 1 : 0;
+}

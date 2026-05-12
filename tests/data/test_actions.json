@@ -1,0 +1,31 @@
+{
+    "default_bindings": [],
+    "actions": [
+        {
+            "name": "/actions/main/in/grab",
+            "type": "boolean"
+        },
+        {
+            "name": "/actions/main/in/trigger",
+            "type": "vector1"
+        },
+        {
+            "name": "/actions/main/in/trackpad",
+            "type": "vector2"
+        },
+        {
+            "name": "/actions/main/in/left_hand",
+            "type": "pose"
+        },
+        {
+            "name": "/actions/main/out/haptic",
+            "type": "vibration"
+        }
+    ],
+    "action_sets": [
+        {
+            "name": "/actions/main",
+            "usage": "leftright"
+        }
+    ]
+}
