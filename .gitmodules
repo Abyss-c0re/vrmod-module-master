@@ -1,0 +1,3 @@
+[submodule "addon"]
+	path = addon
+	url = https://github.com/Abyss-c0re/vrmod-x64
