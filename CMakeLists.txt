@@ -1,82 +1,101 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.10)
 project(vrmod LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(VRMOD_DEV_BUILD "Enable dev build with tests and detailed logging" OFF)
+# ── Paths ──
+set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
+set(OPENVR_LIB_DIR "${DEPS_DIR}/openvr/lib_linux64")
+set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/install/GarrysMod/garrysmod/lua/bin")
 
-# --- Paths ---
-set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
-set(OPENVR_LIB ${DEPS_DIR}/openvr/lib_linux64/libopenvr_api.so)
-
-# --- Shared library: gmcl_vrmod_linux64.dll ---
-set(VRMOD_SOURCES
-    src/vrmod/globals.cpp
-    src/vrmod/logging.cpp
-    src/vrmod/input/vr_input.cpp
-    src/vrmod/rendering/opengl/gl_texture.cpp
-    src/vrmod/rendering/openvr/vr_system.cpp
-    src/vrmod/lua/lua_helpers.cpp
-    src/vrmod/lua/lua_bindings.cpp
-)
-
-add_library(vrmod SHARED ${VRMOD_SOURCES})
-
-target_include_directories(vrmod PRIVATE
+# ── Include dirs (used by both targets) ──
+set(VRMOD_INCLUDE_DIRS
     ${DEPS_DIR}
     ${CMAKE_SOURCE_DIR}/src
 )
 
-target_link_libraries(vrmod PRIVATE
-    ${OPENVR_LIB}
-    dl
-    GL
+# ── Sources by module ──
+set(CORE_SOURCES
+    src/core/vrmod_log.cpp
 )
 
-target_compile_options(vrmod PRIVATE -m64 -Wall)
+set(INPUT_SOURCES
+    src/input/vr_input.cpp
+)
 
-if(NOT VRMOD_DEV_BUILD)
-    target_compile_options(vrmod PRIVATE -O3)
-else()
-    target_compile_definitions(vrmod PRIVATE VRMOD_DEV)
-    target_compile_options(vrmod PRIVATE -O0 -g)
-endif()
+set(RENDER_GL_SOURCES
+    src/rendering/opengl/gl_hooks.cpp
+)
 
-set_target_properties(vrmod PROPERTIES
+set(RENDER_VR_SOURCES
+    src/rendering/openvr/vr_render.cpp
+)
+
+set(LUA_SOURCES
+    src/lua/lua_interface.cpp
+)
+
+# ==============================================================
+#  RELEASE target: shared library (the gmod module)
+# ==============================================================
+option(VRMOD_BUILD_TESTS "Build the dev test runner" OFF)
+
+add_library(vrmod_release SHARED
+    ${CORE_SOURCES}
+    ${INPUT_SOURCES}
+    ${RENDER_GL_SOURCES}
+    ${RENDER_VR_SOURCES}
+    ${LUA_SOURCES}
+)
+
+target_include_directories(vrmod_release PRIVATE ${VRMOD_INCLUDE_DIRS})
+target_compile_options(vrmod_release PRIVATE -O3 -m64)
+target_link_directories(vrmod_release PRIVATE ${OPENVR_LIB_DIR})
+target_link_libraries(vrmod_release PRIVATE openvr_api dl)
+
+set_target_properties(vrmod_release PROPERTIES
     OUTPUT_NAME "gmcl_vrmod_linux64"
-    SUFFIX ".dll"
     PREFIX ""
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/install/GarrysMod/garrysmod/lua/bin"
+    SUFFIX ".dll"
+    LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
     BUILD_RPATH "\$ORIGIN"
     INSTALL_RPATH "\$ORIGIN"
 )
 
-# --- Dev build: test executable ---
-if(VRMOD_DEV_BUILD)
-    # Test sources (input + lua comm tests, no GL link needed)
-    add_executable(vrmod_tests
+# ==============================================================
+#  DEV target: test runner executable (no game, no GL, no real VR)
+# ==============================================================
+if(VRMOD_BUILD_TESTS)
+    set(TEST_SOURCES
         tests/test_main.cpp
         tests/test_input.cpp
         tests/test_lua.cpp
-        src/vrmod/globals.cpp
-        src/vrmod/logging.cpp
-        src/vrmod/input/vr_input.cpp
-        src/vrmod/lua/lua_helpers.cpp
     )
 
-    target_compile_definitions(vrmod_tests PRIVATE VRMOD_DEV VRMOD_TEST)
+    # Only compile modules that are testable without real HW
+    add_executable(vrmod_tests
+        ${CORE_SOURCES}
+        ${INPUT_SOURCES}
+        ${TEST_SOURCES}
+    )
 
     target_include_directories(vrmod_tests PRIVATE
-        ${DEPS_DIR}
-        ${CMAKE_SOURCE_DIR}/src
+        ${VRMOD_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}/tests
     )
 
-    # Tests only use virtual OpenVR calls via mocks — no libopenvr_api link needed.
-    # No GL link needed either.
-    target_compile_options(vrmod_tests PRIVATE -m64 -O0 -g -Wall)
+    target_compile_definitions(vrmod_tests PRIVATE
+        VRMOD_DEV_BUILD
+        VRMOD_TESTING
+    )
 
-    target_link_libraries(vrmod_tests PRIVATE dl)
+    target_compile_options(vrmod_tests PRIVATE -g -O0 -m64)
+    target_link_directories(vrmod_tests PRIVATE ${OPENVR_LIB_DIR})
+    target_link_libraries(vrmod_tests PRIVATE openvr_api dl)
+
+    set_target_properties(vrmod_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
 endif()

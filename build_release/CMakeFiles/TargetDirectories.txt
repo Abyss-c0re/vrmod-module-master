@@ -1,3 +1,0 @@
-/home/voldemar/Dev/GMod/vrmod-module-master/build_release/CMakeFiles/vrmod.dir
-/home/voldemar/Dev/GMod/vrmod-module-master/build_release/CMakeFiles/edit_cache.dir
-/home/voldemar/Dev/GMod/vrmod-module-master/build_release/CMakeFiles/rebuild_cache.dir

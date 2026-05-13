@@ -1,58 +1,104 @@
 #pragma once
+
 #include <cstdio>
-#include <cstring>
 #include <cmath>
+#include <cstring>
+#include <vector>
+#include <string>
+#include <functional>
 
-extern int g_testsPassed;
-extern int g_testsFailed;
-extern int g_currentTestFailed;
+struct TestCase {
+    std::string name;
+    std::function<void()> func;
+};
 
-#define BEGIN_TEST(name) \
-    do { \
-        printf("  [TEST] %-44s ", #name); \
-        g_currentTestFailed = 0;
+inline std::vector<TestCase>& GetTests() {
+    static std::vector<TestCase> tests;
+    return tests;
+}
 
-#define END_TEST() \
-        if (!g_currentTestFailed) { printf("PASS\n"); g_testsPassed++; } \
+inline int& TestsPassed()       { static int v = 0; return v; }
+inline int& TestsFailed()       { static int v = 0; return v; }
+inline int& AssertsPassed()     { static int v = 0; return v; }
+inline int& AssertsFailed()     { static int v = 0; return v; }
+inline bool& CurrentTestFailed(){ static bool v = false; return v; }
+
+#define TEST(name)                                                   \
+    void test_##name();                                              \
+    static bool _reg_##name = [](){                                  \
+        GetTests().push_back({#name, test_##name});                  \
+        return true;                                                 \
+    }();                                                             \
+    void test_##name()
+
+#define ASSERT_TRUE(expr)                                            \
+    do {                                                             \
+        if (!(expr)) {                                               \
+            fprintf(stderr, "  FAIL: %s:%d: ASSERT_TRUE(%s)\n",     \
+                    __FILE__, __LINE__, #expr);                      \
+            AssertsFailed()++; CurrentTestFailed() = true;           \
+        } else { AssertsPassed()++; }                                \
     } while(0)
 
-#define ASSERT_TRUE(cond) do { \
-    if (!(cond)) { \
-        if (!g_currentTestFailed) printf("FAIL\n"); \
-        printf("    Assert: %s at %s:%d\n", #cond, __FILE__, __LINE__); \
-        g_testsFailed++; g_currentTestFailed = 1; \
-    } \
-} while(0)
+#define ASSERT_FALSE(expr)                                           \
+    do {                                                             \
+        if ((expr)) {                                                \
+            fprintf(stderr, "  FAIL: %s:%d: ASSERT_FALSE(%s)\n",    \
+                    __FILE__, __LINE__, #expr);                      \
+            AssertsFailed()++; CurrentTestFailed() = true;           \
+        } else { AssertsPassed()++; }                                \
+    } while(0)
 
-#define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
+#define ASSERT_EQ(a, b)                                              \
+    do {                                                             \
+        if ((a) != (b)) {                                            \
+            fprintf(stderr, "  FAIL: %s:%d: ASSERT_EQ(%s, %s)\n",   \
+                    __FILE__, __LINE__, #a, #b);                     \
+            AssertsFailed()++; CurrentTestFailed() = true;           \
+        } else { AssertsPassed()++; }                                \
+    } while(0)
 
-#define ASSERT_EQ(a, b) do { \
-    if ((a) != (b)) { \
-        if (!g_currentTestFailed) printf("FAIL\n"); \
-        printf("    %s != %s at %s:%d\n", #a, #b, __FILE__, __LINE__); \
-        g_testsFailed++; g_currentTestFailed = 1; \
-    } \
-} while(0)
+#define ASSERT_NEAR(a, b, eps)                                       \
+    do {                                                             \
+        if (fabs((double)(a) - (double)(b)) > (eps)) {              \
+            fprintf(stderr, "  FAIL: %s:%d: ASSERT_NEAR(%s, %s, %s)" \
+                    " got %f vs %f\n",                               \
+                    __FILE__, __LINE__, #a, #b, #eps,                \
+                    (double)(a), (double)(b));                        \
+            AssertsFailed()++; CurrentTestFailed() = true;           \
+        } else { AssertsPassed()++; }                                \
+    } while(0)
 
-#define ASSERT_STREQ(a, b) do { \
-    if (strcmp((a), (b)) != 0) { \
-        if (!g_currentTestFailed) printf("FAIL\n"); \
-        printf("    \"%s\" != \"%s\" at %s:%d\n", (a), (b), __FILE__, __LINE__); \
-        g_testsFailed++; g_currentTestFailed = 1; \
-    } \
-} while(0)
+#define ASSERT_STREQ(a, b)                                           \
+    do {                                                             \
+        if (strcmp((a), (b)) != 0) {                                 \
+            fprintf(stderr, "  FAIL: %s:%d: ASSERT_STREQ(%s, %s)"   \
+                    " got \"%s\" vs \"%s\"\n",                       \
+                    __FILE__, __LINE__, #a, #b, (a), (b));           \
+            AssertsFailed()++; CurrentTestFailed() = true;           \
+        } else { AssertsPassed()++; }                                \
+    } while(0)
 
-#define ASSERT_NEAR(a, b, eps) do { \
-    if (fabs((double)(a) - (double)(b)) > (eps)) { \
-        if (!g_currentTestFailed) printf("FAIL\n"); \
-        printf("    |%g - %g| > %g at %s:%d\n", (double)(a), (double)(b), (double)(eps), __FILE__, __LINE__); \
-        g_testsFailed++; g_currentTestFailed = 1; \
-    } \
-} while(0)
-
-inline int test_report() {
+inline int RunAllTests() {
+    auto& tests = GetTests();
+    printf("Running %zu tests...\n\n", tests.size());
+    for (auto& t : tests) {
+        CurrentTestFailed() = false;
+        printf("[RUN ] %s\n", t.name.c_str());
+        t.func();
+        if (CurrentTestFailed()) {
+            printf("[FAIL] %s\n", t.name.c_str());
+            TestsFailed()++;
+        } else {
+            printf("[ OK ] %s\n", t.name.c_str());
+            TestsPassed()++;
+        }
+    }
     printf("\n========================================\n");
-    printf("Results: %d passed, %d failed\n", g_testsPassed, g_testsFailed);
+    printf("Results: %d passed, %d failed (%d asserts: %d ok, %d failed)\n",
+           TestsPassed(), TestsFailed(),
+           AssertsPassed() + AssertsFailed(),
+           AssertsPassed(), AssertsFailed());
     printf("========================================\n");
-    return g_testsFailed > 0 ? 1 : 0;
+    return TestsFailed() > 0 ? 1 : 0;
 }

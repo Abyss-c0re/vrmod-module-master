@@ -1,138 +1,228 @@
 #include "test_framework.h"
 #include "mocks/mock_openvr.h"
-#include "vrmod/types.h"
-#include "vrmod/globals.h"
-#include "vrmod/input/vr_input.h"
+#include "input/vr_input.h"
+#include "core/vrmod_common.h"
+#include <cstdio>
 #include <cstring>
+#include <cmath>
 
-static vr::MockIVRInput      s_mockInput;
-static vr::MockIVRSystem     s_mockSystem;
-static vr::MockIVRCompositor s_mockCompositor;
+// ─── Pose conversion tests ───
 
-static void setup() {
-    g_pInput = &s_mockInput;
-    g_pSystem = &s_mockSystem;
-    g_compositor = &s_mockCompositor;
-    g_actionCount = 0;
-    g_actionSetCount = 0;
-    g_activeActionSetCount = 0;
-    memset(g_actions, 0, sizeof(g_actions));
-    memset(g_actionSets, 0, sizeof(g_actionSets));
-    s_mockInput.mockHandleCounter = 100;
-    s_mockInput.mockSetHandleCounter = 200;
-    s_mockInput.hapticTriggered = false;
-    s_mockSystem.mockDeviceCount = 0;
+TEST(ConvertPose_Identity_Translation) {
+    // Mat row0=[1,0,0, tx=2.0], row1=[0,1,0, ty=3.0], row2=[0,0,1, tz=5.0]
+    // Expected: pos.x = -tz = -5.0, pos.y = -tx = -2.0, pos.z = ty = 3.0
+    auto pose = mock::MakePose(2.0f, 3.0f, 5.0f,  0,0,0,  0,0,0);
+    PoseResult r = ConvertPose(pose);
+    ASSERT_TRUE(r.valid);
+    ASSERT_NEAR(r.pos[0], -5.0f, 0.001f);
+    ASSERT_NEAR(r.pos[1], -2.0f, 0.001f);
+    ASSERT_NEAR(r.pos[2],  3.0f, 0.001f);
 }
 
-void run_input_tests() {
-    printf("\n=== Input Module Tests ===\n");
+TEST(ConvertPose_Velocity) {
+    // vVelocity = (vx=1.0, vy=2.0, vz=3.0)
+    // Expected: vel.x = -vz = -3.0, vel.y = -vx = -1.0, vel.z = vy = 2.0
+    auto pose = mock::MakePose(0,0,0,  1.0f, 2.0f, 3.0f,  0,0,0);
+    PoseResult r = ConvertPose(pose);
+    ASSERT_TRUE(r.valid);
+    ASSERT_NEAR(r.vel[0], -3.0f, 0.001f);
+    ASSERT_NEAR(r.vel[1], -1.0f, 0.001f);
+    ASSERT_NEAR(r.vel[2],  2.0f, 0.001f);
+}
 
-    BEGIN_TEST(parse_action_manifest_loads_actions);
-        setup();
-        char err[256] = {};
-        bool ok = VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        ASSERT_TRUE(ok);
-        ASSERT_EQ(g_actionCount, 5);
-    END_TEST();
+TEST(ConvertPose_AngularVelocity) {
+    // vAngularVelocity = (avx=0.5, avy=1.0, avz=1.5) in rad/s
+    // Expected: angvel.x = -avz * (180/PI), angvel.y = -avx * (180/PI), angvel.z = avy * (180/PI)
+    auto pose = mock::MakePose(0,0,0, 0,0,0,  0.5f, 1.0f, 1.5f);
+    PoseResult r = ConvertPose(pose);
+    ASSERT_TRUE(r.valid);
+    float toDeg = 180.0f / PI_F;
+    ASSERT_NEAR(r.angvel[0], -1.5f * toDeg, 0.01f);
+    ASSERT_NEAR(r.angvel[1], -0.5f * toDeg, 0.01f);
+    ASSERT_NEAR(r.angvel[2],  1.0f * toDeg, 0.01f);
+}
 
-    BEGIN_TEST(parse_action_manifest_short_names);
-        setup();
-        char err[256] = {};
-        VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        ASSERT_STREQ(g_actions[0].name, "grab");
-        ASSERT_STREQ(g_actions[1].name, "trigger");
-        ASSERT_STREQ(g_actions[2].name, "trackpad");
-        ASSERT_STREQ(g_actions[3].name, "left_hand");
-        ASSERT_STREQ(g_actions[4].name, "haptic");
-    END_TEST();
+TEST(ConvertPose_Identity_Angles) {
+    // Identity rotation matrix should give all-zero angles
+    auto pose = mock::MakePose(0,0,0, 0,0,0, 0,0,0);
+    PoseResult r = ConvertPose(pose);
+    ASSERT_TRUE(r.valid);
+    ASSERT_NEAR(r.ang[0], 0.0f, 0.001f);
+    ASSERT_NEAR(r.ang[1], 0.0f, 0.001f);
+    ASSERT_NEAR(r.ang[2], 0.0f, 0.001f);
+}
 
-    BEGIN_TEST(parse_action_manifest_fullnames);
-        setup();
-        char err[256] = {};
-        VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        ASSERT_STREQ(g_actions[0].fullname, "/actions/main/in/grab");
-        ASSERT_STREQ(g_actions[4].fullname, "/actions/main/out/haptic");
-    END_TEST();
+TEST(ConvertPose_Invalid) {
+    auto pose = mock::MakePose(1,2,3, 4,5,6, 7,8,9, false);
+    PoseResult r = ConvertPose(pose);
+    ASSERT_FALSE(r.valid);
+}
 
-    BEGIN_TEST(parse_action_types_match_enums);
-        setup();
-        char err[256] = {};
-        VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        ASSERT_EQ(g_actions[0].type, ActionType_Boolean);
-        ASSERT_EQ(g_actions[1].type, ActionType_Vector1);
-        ASSERT_EQ(g_actions[2].type, ActionType_Vector2);
-        ASSERT_EQ(g_actions[3].type, ActionType_Pose);
-        ASSERT_EQ(g_actions[4].type, ActionType_Vibration);
-    END_TEST();
+// ─── Action manifest parsing tests ───
 
-    BEGIN_TEST(parse_action_handles_assigned);
-        setup();
-        char err[256] = {};
-        VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        ASSERT_EQ(g_actions[0].handle, (vr::VRActionHandle_t)101);
-        ASSERT_EQ(g_actions[1].handle, (vr::VRActionHandle_t)102);
-        ASSERT_EQ(g_actions[4].handle, (vr::VRActionHandle_t)105);
-    END_TEST();
+TEST(ParseActionManifest_ValidFile) {
+    // Create a temporary action manifest file
+    const char* tmpPath = "/tmp/vrmod_test_actions.json";
+    FILE* f = fopen(tmpPath, "w");
+    ASSERT_TRUE(f != nullptr);
+    fprintf(f, "{\n");
+    fprintf(f, "  \"actions\": [\n");
+    fprintf(f, "    { \"name\": \"/actions/main/in/trigger\", \"type\": \"boolean\" },\n");
+    fprintf(f, "    { \"name\": \"/actions/main/in/trackpad\", \"type\": \"vector2\" },\n");
+    fprintf(f, "    { \"name\": \"/actions/main/in/hand_left\", \"type\": \"pose\" }\n");
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+    fclose(f);
 
-    BEGIN_TEST(parse_action_manifest_missing_file);
-        setup();
-        char err[256] = {};
-        bool ok = VRInput_SetActionManifest("/nonexistent/path.json", err, sizeof(err));
-        ASSERT_FALSE(ok);
-        ASSERT_TRUE(strlen(err) > 0);
-    END_TEST();
+    mock::MockVRInput mockInput;
+    action actions[MAX_ACTIONS];
+    int count = ParseActionManifest(tmpPath, actions, MAX_ACTIONS, &mockInput);
 
-    BEGIN_TEST(set_active_action_sets);
-        setup();
-        const char* sets[] = { "/actions/main", "/actions/secondary" };
-        VRInput_SetActiveActionSets(sets, 2);
-        ASSERT_EQ(g_activeActionSetCount, 2);
-        ASSERT_EQ(g_actionSetCount, 2);
-        ASSERT_STREQ(g_actionSets[0].name, "/actions/main");
-        ASSERT_STREQ(g_actionSets[1].name, "/actions/secondary");
-    END_TEST();
+    ASSERT_EQ(count, 3);
 
-    BEGIN_TEST(set_active_action_sets_reuses_existing);
-        setup();
-        const char* sets1[] = { "/actions/main" };
-        VRInput_SetActiveActionSets(sets1, 1);
-        ASSERT_EQ(g_actionSetCount, 1);
-        VRInput_SetActiveActionSets(sets1, 1);
-        ASSERT_EQ(g_actionSetCount, 1);
-    END_TEST();
+    // Verify names were parsed correctly (name points to after last '/')
+    ASSERT_STREQ(actions[0].name, "trigger");
+    ASSERT_STREQ(actions[1].name, "trackpad");
+    ASSERT_STREQ(actions[2].name, "hand_left");
 
-    BEGIN_TEST(trigger_haptic_fires);
-        setup();
-        char err[256] = {};
-        VRInput_SetActionManifest("tests/data/test_actions.json", err, sizeof(err));
-        s_mockInput.hapticTriggered = false;
-        VRInput_TriggerHaptic("haptic", 0.0f, 0.5f, 100.0f, 0.8f);
-        ASSERT_TRUE(s_mockInput.hapticTriggered);
-        ASSERT_NEAR(s_mockInput.lastHapticAmplitude, 0.8f, 0.001f);
-    END_TEST();
+    // Verify fullnames
+    ASSERT_STREQ(actions[0].fullname, "/actions/main/in/trigger");
 
-    BEGIN_TEST(trigger_haptic_nonexistent_noop);
-        setup();
-        s_mockInput.hapticTriggered = false;
-        VRInput_TriggerHaptic("nonexistent", 0, 0, 0, 0);
-        ASSERT_FALSE(s_mockInput.hapticTriggered);
-    END_TEST();
+    // Verify types are non-zero (sum of chars in type string)
+    ASSERT_TRUE(actions[0].type > 0);
+    ASSERT_TRUE(actions[1].type > 0);
+    ASSERT_TRUE(actions[2].type > 0);
 
-    BEGIN_TEST(get_tracked_device_names);
-        setup();
-        strcpy(s_mockSystem.mockDeviceNames[0], "knuckles_left");
-        strcpy(s_mockSystem.mockDeviceNames[1], "knuckles_right");
-        s_mockSystem.mockDeviceCount = 2;
-        char names[16][256] = {};
-        int count = VRInput_GetTrackedDeviceNames(names, 16);
-        ASSERT_EQ(count, 2);
-        ASSERT_STREQ(names[0], "knuckles_left");
-        ASSERT_STREQ(names[1], "knuckles_right");
-    END_TEST();
+    // Verify handles were requested from mock
+    ASSERT_EQ((int)mockInput.actionHandles.size(), 3);
 
-    BEGIN_TEST(update_poses_and_actions_no_crash);
-        setup();
-        VRInput_UpdatePosesAndActions();
-        ASSERT_TRUE(true);
-    END_TEST();
+    remove(tmpPath);
+}
+
+TEST(ParseActionManifest_EmptyFile) {
+    const char* tmpPath = "/tmp/vrmod_test_empty.json";
+    FILE* f = fopen(tmpPath, "w");
+    fprintf(f, "{}\n");
+    fclose(f);
+
+    mock::MockVRInput mockInput;
+    action actions[MAX_ACTIONS];
+    int count = ParseActionManifest(tmpPath, actions, MAX_ACTIONS, &mockInput);
+    ASSERT_EQ(count, 0);
+
+    remove(tmpPath);
+}
+
+TEST(ParseActionManifest_ManifestPathError) {
+    mock::MockVRInput mockInput;
+    mockInput.manifestError = vr::VRInputError_InvalidParam;
+
+    action actions[MAX_ACTIONS];
+    int count = ParseActionManifest("/tmp/nonexistent_for_test.json", actions, MAX_ACTIONS, &mockInput);
+    ASSERT_EQ(count, -1);
+}
+
+TEST(ParseActionManifest_FileNotFound) {
+    mock::MockVRInput mockInput;
+    action actions[MAX_ACTIONS];
+    int count = ParseActionManifest("/tmp/this_file_does_not_exist_12345.json", actions, MAX_ACTIONS, &mockInput);
+    ASSERT_EQ(count, -2);
+}
+
+// ─── Action set management tests ───
+
+TEST(FindOrCreateActionSet_New) {
+    mock::MockVRInput mockInput;
+    actionSet sets[MAX_ACTIONSETS];
+    memset(sets, 0, sizeof(sets));
+    int count = 0;
+
+    int idx = FindOrCreateActionSet("/actions/main", sets, &count, &mockInput);
+    ASSERT_EQ(idx, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_STREQ(sets[0].name, "/actions/main");
+}
+
+TEST(FindOrCreateActionSet_Existing) {
+    mock::MockVRInput mockInput;
+    actionSet sets[MAX_ACTIONSETS];
+    memset(sets, 0, sizeof(sets));
+    int count = 0;
+
+    int idx1 = FindOrCreateActionSet("/actions/main", sets, &count, &mockInput);
+    int idx2 = FindOrCreateActionSet("/actions/main", sets, &count, &mockInput);
+    ASSERT_EQ(idx1, idx2);
+    ASSERT_EQ(count, 1);
+}
+
+TEST(FindOrCreateActionSet_Multiple) {
+    mock::MockVRInput mockInput;
+    actionSet sets[MAX_ACTIONSETS];
+    memset(sets, 0, sizeof(sets));
+    int count = 0;
+
+    int idx1 = FindOrCreateActionSet("/actions/main", sets, &count, &mockInput);
+    int idx2 = FindOrCreateActionSet("/actions/driving", sets, &count, &mockInput);
+    ASSERT_EQ(idx1, 0);
+    ASSERT_EQ(idx2, 1);
+    ASSERT_EQ(count, 2);
+}
+
+// ─── Haptic lookup tests ───
+
+TEST(FindActionHandleByName_Found) {
+    action actions[3];
+    memset(actions, 0, sizeof(actions));
+    strcpy(actions[0].fullname, "/actions/main/in/haptic_left");
+    actions[0].name = actions[0].fullname + 17; // "haptic_left"
+    actions[0].handle = 42;
+    strcpy(actions[1].fullname, "/actions/main/in/haptic_right");
+    actions[1].name = actions[1].fullname + 17; // "haptic_right"
+    actions[1].handle = 43;
+
+    vr::VRActionHandle_t h = FindActionHandleByName("haptic_left", actions, 2);
+    ASSERT_EQ(h, (vr::VRActionHandle_t)42);
+}
+
+TEST(FindActionHandleByName_NotFound) {
+    action actions[1];
+    memset(actions, 0, sizeof(actions));
+    strcpy(actions[0].fullname, "/actions/main/in/trigger");
+    actions[0].name = actions[0].fullname + 17;
+    actions[0].handle = 10;
+
+    vr::VRActionHandle_t h = FindActionHandleByName("nonexistent", actions, 1);
+    ASSERT_EQ(h, vr::k_ulInvalidActionHandle);
+}
+
+// ─── Boolean action type hash test ───
+
+TEST(ActionType_BooleanHash) {
+    // The original code sums char values of the type string to get the type enum
+    // "boolean" should hash to ActionType_Boolean = 736
+    const char* typeStr = "boolean";
+    int hash = 0;
+    for (int i = 0; typeStr[i]; i++) hash += typeStr[i];
+    ASSERT_EQ(hash, ActionType_Boolean);
+}
+
+TEST(ActionType_PoseHash) {
+    const char* typeStr = "pose";
+    int hash = 0;
+    for (int i = 0; typeStr[i]; i++) hash += typeStr[i];
+    ASSERT_EQ(hash, ActionType_Pose);
+}
+
+TEST(ActionType_Vector1Hash) {
+    const char* typeStr = "vector1";
+    int hash = 0;
+    for (int i = 0; typeStr[i]; i++) hash += typeStr[i];
+    ASSERT_EQ(hash, ActionType_Vector1);
+}
+
+TEST(ActionType_Vector2Hash) {
+    const char* typeStr = "vector2";
+    int hash = 0;
+    for (int i = 0; typeStr[i]; i++) hash += typeStr[i];
+    ASSERT_EQ(hash, ActionType_Vector2);
 }

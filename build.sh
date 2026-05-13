@@ -17,5 +17,5 @@ fi
 
 mkdir -p build_release
 cd build_release
-cmake .. -DVRMOD_DEV_BUILD=OFF
-make -j$(nproc)
+cmake .. -DCMAKE_BUILD_TYPE=Release -DVRMOD_BUILD_TESTS=OFF
+make -j$(nproc) vrmod_release

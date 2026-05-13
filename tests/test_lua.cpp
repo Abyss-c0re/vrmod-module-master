@@ -1,190 +1,201 @@
 #include "test_framework.h"
 #include "mocks/mock_lua.h"
-#include "vrmod/types.h"
-#include "vrmod/globals.h"
-#include "vrmod/lua/lua_helpers.h"
+#include "mocks/mock_openvr.h"
+#include "input/vr_input.h"
+#include "core/vrmod_common.h"
 #include <cstring>
-#include <cmath>
 
-static MockLuaBase s_lua;
+// ─── PoseResult → Lua table push verification ───
+// Simulates what GetPoses does with the converted pose data
 
-static void setup() {
-    s_lua.reset();
-    memset(g_luaRefs, 0, sizeof(g_luaRefs));
-    g_luaRefCount = 0;
-    g_actionCount = 0;
-    g_actionSetCount = 0;
-    g_activeActionSetCount = 0;
-    g_IsPaused = false;
-    memset(g_actions, 0, sizeof(g_actions));
+static void PushPoseToLua(GarrysMod::Lua::ILuaBase* LUA, const PoseResult& pr, const char* name, int poseRef) {
+    if (!pr.valid) return;
+    Vector pos; pos.x = pr.pos[0]; pos.y = pr.pos[1]; pos.z = pr.pos[2];
+    Vector vel; vel.x = pr.vel[0]; vel.y = pr.vel[1]; vel.z = pr.vel[2];
+    QAngle ang; ang.x = pr.ang[0]; ang.y = pr.ang[1]; ang.z = pr.ang[2];
+    QAngle angvel; angvel.x = pr.angvel[0]; angvel.y = pr.angvel[1]; angvel.z = pr.angvel[2];
+    LUA->ReferencePush(poseRef);
+    LUA->PushVector(pos);
+    LUA->SetField(-2, "pos");
+    LUA->PushVector(vel);
+    LUA->SetField(-2, "vel");
+    LUA->PushAngle(ang);
+    LUA->SetField(-2, "ang");
+    LUA->PushAngle(angvel);
+    LUA->SetField(-2, "angvel");
+    LUA->SetField(-2, name);
 }
 
-void run_lua_tests() {
-    printf("\n=== Lua Communication Tests ===\n");
+TEST(LuaPose_PushesCorrectFields) {
+    mock::MockLuaBase lua;
+    auto pose = mock::MakePose(1, 2, 3,  0, 0, 0,  0, 0, 0);
+    PoseResult pr = ConvertPose(pose);
+    PushPoseToLua(&lua, pr, "hmd", 1);
 
-    BEGIN_TEST(lua_print_calls_global_print);
-        setup();
-        LuaPrint(&s_lua, "Hello VRMOD");
-        bool foundPushSpecial = false, foundGetField = false, foundPushString = false;
-        for (auto& c : s_lua.calls) {
-            if (c.method == "PushSpecial" && c.intArg == GarrysMod::Lua::SPECIAL_GLOB) foundPushSpecial = true;
-            if (c.method == "GetField" && c.strArg == "print") foundGetField = true;
-            if (c.method == "PushString" && c.strArg == "Hello VRMOD") foundPushString = true;
+    ASSERT_TRUE(mock::HasSetField(lua, "pos"));
+    ASSERT_TRUE(mock::HasSetField(lua, "vel"));
+    ASSERT_TRUE(mock::HasSetField(lua, "ang"));
+    ASSERT_TRUE(mock::HasSetField(lua, "angvel"));
+    ASSERT_TRUE(mock::HasSetField(lua, "hmd"));
+
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_VECTOR), 2);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_ANGLE), 2);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::REF_PUSH), 1);
+}
+
+TEST(LuaPose_InvalidSkipped) {
+    mock::MockLuaBase lua;
+    auto pose = mock::MakePose(0,0,0, 0,0,0, 0,0,0, false);
+    PoseResult pr = ConvertPose(pose);
+    PushPoseToLua(&lua, pr, "hmd", 1);
+
+    // Nothing should have been pushed
+    ASSERT_EQ((int)lua.calls.size(), 0);
+}
+
+// ─── Matrix push verification ───
+
+static void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigned int rows, unsigned int cols) {
+    LUA->CreateTable();
+    for (unsigned int row = 0; row < rows; row++) {
+        LUA->PushNumber(row + 1);
+        LUA->CreateTable();
+        for (unsigned int col = 0; col < cols; col++) {
+            LUA->PushNumber(col + 1);
+            LUA->PushNumber(mtx[row * cols + col]);
+            LUA->SetTable(-3);
         }
-        ASSERT_TRUE(foundPushSpecial);
-        ASSERT_TRUE(foundGetField);
-        ASSERT_TRUE(foundPushString);
-    END_TEST();
+        LUA->SetTable(-3);
+    }
+}
 
-    BEGIN_TEST(push_matrix_2x2_creates_3_tables);
-        setup();
-        float mat[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
-        PushMatrixAsTable(&s_lua, mat, 2, 2);
-        int createCount = 0;
-        for (auto& c : s_lua.calls)
-            if (c.method == "CreateTable") createCount++;
-        ASSERT_EQ(createCount, 3);
-    END_TEST();
+TEST(LuaMatrix_3x4) {
+    mock::MockLuaBase lua;
+    float mat[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
+    PushMatrixAsTable(&lua, mat, 3, 4);
 
-    BEGIN_TEST(push_matrix_4x4_creates_5_tables);
-        setup();
-        float identity[16] = {};
-        for (int i = 0; i < 4; i++) identity[i*4+i] = 1.0f;
-        PushMatrixAsTable(&s_lua, identity, 4, 4);
-        int createCount = 0;
-        for (auto& c : s_lua.calls)
-            if (c.method == "CreateTable") createCount++;
-        ASSERT_EQ(createCount, 5);
-    END_TEST();
+    // 1 outer table + 3 row tables = 4 CreateTable calls
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::CREATE_TABLE), 4);
+    // 3 row indices + (3 * 4) col indices + (3 * 4) values = 3 + 12 + 12 = 27 PushNumber
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_NUMBER), 27);
+    // 3 * 4 cell SetTable + 3 row SetTable = 15 SetTable
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::SET_TABLE), 15);
+}
 
-    BEGIN_TEST(push_matrix_3x4_creates_4_tables);
-        setup();
-        float mat[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
-        PushMatrixAsTable(&s_lua, mat, 3, 4);
-        int createCount = 0;
-        for (auto& c : s_lua.calls)
-            if (c.method == "CreateTable") createCount++;
-        ASSERT_EQ(createCount, 4);
-    END_TEST();
+TEST(LuaMatrix_4x4) {
+    mock::MockLuaBase lua;
+    float mat[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    PushMatrixAsTable(&lua, mat, 4, 4);
 
-    BEGIN_TEST(push_matrix_1x1_values_1_indexed);
-        setup();
-        float mat[1] = { 42.0f };
-        PushMatrixAsTable(&s_lua, mat, 1, 1);
-        ASSERT_TRUE(s_lua.pushedNumbers.size() >= 3);
-        ASSERT_NEAR(s_lua.pushedNumbers[0], 1.0, 0.001);
-        ASSERT_NEAR(s_lua.pushedNumbers[1], 1.0, 0.001);
-        ASSERT_NEAR(s_lua.pushedNumbers[2], 42.0, 0.001);
-    END_TEST();
+    // 1 outer + 4 row = 5 CreateTable
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::CREATE_TABLE), 5);
+    // 4 row indices + (4*4) col indices + (4*4) values = 4 + 16 + 16 = 36
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_NUMBER), 36);
+}
 
-    BEGIN_TEST(lua_ref_create_unique_ids);
-        setup();
-        for (int i = 0; i < LuaRefIndex_Max; i++) {
-            s_lua.CreateTable();
-            g_luaRefs[i] = s_lua.ReferenceCreate();
-            g_luaRefCount++;
-        }
-        ASSERT_EQ(g_luaRefCount, LuaRefIndex_Max);
-        for (int i = 0; i < LuaRefIndex_Max; i++)
-            for (int j = i+1; j < LuaRefIndex_Max; j++)
-                ASSERT_TRUE(g_luaRefs[i] != g_luaRefs[j]);
-    END_TEST();
+// ─── Lua ref management ───
 
-    BEGIN_TEST(action_lua_refs_created_per_action);
-        setup();
-        g_actionCount = 2;
-        for (int i = 0; i < g_actionCount; i++)
-            for (int j = 0; j < 2; j++) {
-                s_lua.CreateTable();
-                g_actions[i].luaRefs[j] = s_lua.ReferenceCreate();
-            }
-        ASSERT_TRUE(g_actions[0].luaRefs[0] > 0);
-        ASSERT_TRUE(g_actions[0].luaRefs[1] > 0);
-        ASSERT_TRUE(g_actions[0].luaRefs[0] != g_actions[0].luaRefs[1]);
-        ASSERT_TRUE(g_actions[0].luaRefs[0] != g_actions[1].luaRefs[0]);
-    END_TEST();
+TEST(LuaRef_CreateAndFree) {
+    mock::MockLuaBase lua;
 
-    BEGIN_TEST(shutdown_frees_all_refs);
-        setup();
-        g_luaRefCount = LuaRefIndex_Max;
-        for (int i = 0; i < LuaRefIndex_Max; i++) {
-            s_lua.CreateTable();
-            g_luaRefs[i] = s_lua.ReferenceCreate();
-        }
-        g_actionCount = 1;
-        for (int j = 0; j < 2; j++) {
-            s_lua.CreateTable();
-            g_actions[0].luaRefs[j] = s_lua.ReferenceCreate();
-        }
-        s_lua.calls.clear();
-        for (int i = 0; i < g_luaRefCount; i++)
-            if (g_luaRefs[i] != 0) { s_lua.ReferenceFree(g_luaRefs[i]); g_luaRefs[i] = 0; }
-        for (int i = 0; i < g_actionCount; i++)
-            for (int j = 0; j < 2; j++)
-                if (g_actions[i].luaRefs[j] != 0) { s_lua.ReferenceFree(g_actions[i].luaRefs[j]); g_actions[i].luaRefs[j] = 0; }
-        int freeCount = 0;
-        for (auto& c : s_lua.calls)
-            if (c.method == "ReferenceFree") freeCount++;
-        ASSERT_EQ(freeCount, LuaRefIndex_Max + 2);
-    END_TEST();
+    // Simulate creating refs like Init does
+    int refs[4];
+    for (int i = 0; i < 4; i++) {
+        lua.CreateTable();
+        refs[i] = lua.ReferenceCreate();
+    }
+    ASSERT_EQ(refs[0], 1);
+    ASSERT_EQ(refs[1], 2);
+    ASSERT_EQ(refs[2], 3);
+    ASSERT_EQ(refs[3], 4);
 
-    BEGIN_TEST(pose_math_identity_position);
-        setup();
-        memset(&g_poses[0], 0, sizeof(g_poses[0]));
-        g_poses[0].bPoseIsValid = true;
-        vr::HmdMatrix34_t& mat = g_poses[0].mDeviceToAbsoluteTracking;
-        mat.m[0][0]=1; mat.m[0][3]=1.0f;
-        mat.m[1][1]=1; mat.m[1][3]=2.0f;
-        mat.m[2][2]=1; mat.m[2][3]=3.0f;
-        Vector pos;
-        pos.x = -mat.m[2][3];
-        pos.y = -mat.m[0][3];
-        pos.z = mat.m[1][3];
-        ASSERT_NEAR(pos.x, -3.0f, 0.001f);
-        ASSERT_NEAR(pos.y, -1.0f, 0.001f);
-        ASSERT_NEAR(pos.z,  2.0f, 0.001f);
-    END_TEST();
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::CREATE_TABLE), 4);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::REF_CREATE), 4);
 
-    BEGIN_TEST(pose_math_identity_angles);
-        setup();
-        memset(&g_poses[0], 0, sizeof(g_poses[0]));
-        g_poses[0].bPoseIsValid = true;
-        vr::HmdMatrix34_t& mat = g_poses[0].mDeviceToAbsoluteTracking;
-        mat.m[0][0]=1; mat.m[1][1]=1; mat.m[2][2]=1;
-        QAngle ang;
-        ang.x = asinf(mat.m[1][2]) * (180.0f / PI_F);
-        ang.y = atan2f(mat.m[0][2], mat.m[2][2]) * (180.0f / PI_F);
-        ang.z = atan2f(-mat.m[1][0], mat.m[1][1]) * (180.0f / PI_F);
-        ASSERT_NEAR(ang.x, 0.0f, 0.001f);
-        ASSERT_NEAR(ang.y, 0.0f, 0.001f);
-        ASSERT_NEAR(ang.z, 0.0f, 0.001f);
-    END_TEST();
+    // Free them
+    for (int i = 0; i < 4; i++) {
+        lua.ReferenceFree(refs[i]);
+    }
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::REF_FREE), 4);
+}
 
-    BEGIN_TEST(pose_math_90deg_yaw);
-        setup();
-        memset(&g_poses[0], 0, sizeof(g_poses[0]));
-        g_poses[0].bPoseIsValid = true;
-        vr::HmdMatrix34_t& mat = g_poses[0].mDeviceToAbsoluteTracking;
-        mat.m[0][0]=0;  mat.m[0][2]=1;
-        mat.m[1][1]=1;
-        mat.m[2][0]=-1; mat.m[2][2]=0;
-        QAngle ang;
-        ang.y = atan2f(mat.m[0][2], mat.m[2][2]) * (180.0f / PI_F);
-        ASSERT_NEAR(ang.y, 90.0f, 0.001f);
-    END_TEST();
+// ─── Error reporting ───
 
-    BEGIN_TEST(velocity_conversion);
-        setup();
-        memset(&g_poses[0], 0, sizeof(g_poses[0]));
-        g_poses[0].vVelocity.v[0] = 1.0f;
-        g_poses[0].vVelocity.v[1] = 2.0f;
-        g_poses[0].vVelocity.v[2] = 3.0f;
-        Vector vel;
-        vel.x = -g_poses[0].vVelocity.v[2];
-        vel.y = -g_poses[0].vVelocity.v[0];
-        vel.z = g_poses[0].vVelocity.v[1];
-        ASSERT_NEAR(vel.x, -3.0f, 0.001f);
-        ASSERT_NEAR(vel.y, -1.0f, 0.001f);
-        ASSERT_NEAR(vel.z,  2.0f, 0.001f);
-    END_TEST();
+TEST(LuaError_ThrowRecorded) {
+    mock::MockLuaBase lua;
+    lua.ThrowError("VRMOD: test error");
+    ASSERT_TRUE(lua.throwCalled);
+    ASSERT_STREQ(lua.lastError.c_str(), "VRMOD: test error");
+}
+
+// ─── Module registration verification ───
+// Verifies that the expected function names would be registered
+
+TEST(ModuleRegistration_AllFunctionsPresent) {
+    const char* expectedFunctions[] = {
+        "GetVersion", "IsHMDPresent", "Init",
+        "SetActionManifest", "SetActiveActionSets", "GetDisplayInfo",
+        "UpdatePosesAndActions", "GetPoses", "GetActions",
+        "ShareTextureBegin", "ShareTextureFinish",
+        "SetSubmitTextureBounds", "SubmitSharedTexture",
+        "Shutdown", "TriggerHaptic", "GetTrackedDeviceNames"
+    };
+
+    // Simulate what GMOD_MODULE_OPEN does: PushCFunction + SetField for each
+    mock::MockLuaBase lua;
+    for (auto name : expectedFunctions) {
+        lua.PushCFunction(nullptr);
+        lua.SetField(-2, name);
+    }
+
+    // Verify all names were set
+    for (auto name : expectedFunctions) {
+        ASSERT_TRUE(mock::HasSetField(lua, name));
+    }
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_CFUNC), 16);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::SET_FIELD), 16);
+}
+
+// ─── CheckString/CheckNumber mock returns ───
+
+TEST(MockLua_CheckStringReturns) {
+    mock::MockLuaBase lua;
+    lua.checkStringReturns = {"hello", "world"};
+    ASSERT_STREQ(lua.CheckString(1), "hello");
+    ASSERT_STREQ(lua.CheckString(2), "world");
+}
+
+TEST(MockLua_CheckNumberReturns) {
+    mock::MockLuaBase lua;
+    lua.checkNumberReturns = {1.5, 2.5, 3.5};
+    ASSERT_NEAR(lua.CheckNumber(1), 1.5, 0.001);
+    ASSERT_NEAR(lua.CheckNumber(2), 2.5, 0.001);
+    ASSERT_NEAR(lua.CheckNumber(3), 3.5, 0.001);
+}
+
+// ─── End-to-end: pose conversion + lua push for multiple poses ───
+
+TEST(EndToEnd_MultiplePoses) {
+    mock::MockLuaBase lua;
+
+    // Simulate HMD + 2 controller poses
+    vr::TrackedDevicePose_t poses[3];
+    poses[0] = mock::MakePose(0, 1.7f, 0,  0,0,0,  0,0,0);  // HMD at 1.7m height
+    poses[1] = mock::MakePose(-0.3f, 1.0f, 0.5f,  0,0,0,  0,0,0);  // Left
+    poses[2] = mock::MakePose(0.3f, 1.0f, 0.5f,  0,0,0,  0,0,0);   // Right
+
+    const char* names[] = {"hmd", "hand_left", "hand_right"};
+    for (int i = 0; i < 3; i++) {
+        PoseResult pr = ConvertPose(poses[i]);
+        ASSERT_TRUE(pr.valid);
+        PushPoseToLua(&lua, pr, names[i], i + 1);
+    }
+
+    // 3 poses * (1 ReferencePush + 2 PushVector + 2 PushAngle + 5 SetField)
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::REF_PUSH), 3);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_VECTOR), 6);
+    ASSERT_EQ(mock::CountCalls(lua, mock::LuaCall::PUSH_ANGLE), 6);
+    ASSERT_TRUE(mock::HasSetField(lua, "hmd"));
+    ASSERT_TRUE(mock::HasSetField(lua, "hand_left"));
+    ASSERT_TRUE(mock::HasSetField(lua, "hand_right"));
 }

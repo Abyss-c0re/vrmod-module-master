@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/voldemar/Dev/GMod/vrmod-module-master/build_release/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
