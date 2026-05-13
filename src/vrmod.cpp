@@ -214,7 +214,7 @@ LUA_FUNCTION(IsHMDPresent) {
     return 1;
 }
 
-LUA_FUNCTION(Init) {
+with  {
         if (g_pSystem != nullptr) {
             if (g_IsPaused)
                 {
