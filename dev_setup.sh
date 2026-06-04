@@ -6,13 +6,33 @@ echo "This script will detect your package manager (apt or pacman)"
 echo "and install all required system dependencies to build the project."
 echo
 
+# Helper to run package manager commands.
+# Tries without sudo first (useful in containers, root shells, or passwordless setups).
+# Falls back to sudo only if the direct attempt fails.
+run_privileged() {
+    if [ "$(id -u)" -eq 0 ]; then
+        # Already running as root
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        # Try without sudo first
+        if "$@"; then
+            return 0
+        fi
+        echo "Direct execution failed, retrying with sudo..."
+        sudo "$@"
+    else
+        # No sudo available, just run it (will likely fail with permission error)
+        "$@"
+    fi
+}
+
 if command -v apt-get >/dev/null 2>&1; then
     echo "[+] Detected Debian/Ubuntu (apt)"
     echo "Updating package lists..."
-    sudo apt-get update -qq
+    run_privileged apt-get update -qq
 
     echo "Installing build dependencies..."
-    sudo apt-get install -y -qq \
+    if ! run_privileged apt-get install -y -qq \
         build-essential \
         cmake \
         pkg-config \
@@ -25,17 +45,17 @@ if command -v apt-get >/dev/null 2>&1; then
         libxinerama-dev \
         libxcursor-dev \
         libxi-dev \
-        libopenxr-dev || {
+        libopenxr-dev; then
             echo "[!] libopenxr-dev not available on this distro (common on older releases)."
             echo "    OpenXR headers will be automatically downloaded by build.sh instead."
-        }
+    fi
 
     echo "[+] apt dependencies installed."
 
 elif command -v pacman >/dev/null 2>&1; then
     echo "[+] Detected Arch Linux (pacman)"
     echo "Updating system and installing dependencies..."
-    sudo pacman -Syu --needed --noconfirm \
+    run_privileged pacman -Syu --needed --noconfirm \
         base-devel \
         cmake \
         pkg-config \
