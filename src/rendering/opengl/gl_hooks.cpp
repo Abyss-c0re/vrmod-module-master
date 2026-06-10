@@ -9,8 +9,10 @@
 char                g_createTextureOrigBytes[14];
 void*               g_createTexture = NULL;
 GLuint              g_sharedTexture = 0;
+GLuint              g_captureTexture = 0;
 COpenGLEntryPoints* g_GL = NULL;
 bool                g_glIsPatched = false;
+bool                g_captureStealActive = false;
 
 void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
@@ -35,7 +37,15 @@ void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_
 void CreateTextureHook(GLsizei n, GLuint *textures) {
     memcpy((void*)g_createTexture, (void*)g_createTextureOrigBytes, 14);
     ((glGenTextures_t)g_createTexture)(n, textures);
-    g_sharedTexture = textures[0];
+    // Preserve the "main" stolen ID for the addon's primary VR RT (the one targeted
+    // directly by PerformRenderViews + the two RenderView calls). Only clobber it
+    // for the main shared if capture steal is not active. Capture gets its own.
+    if (!g_captureStealActive) {
+        g_sharedTexture = textures[0];
+    }
+    if (g_captureStealActive) {
+        g_captureTexture = textures[0];
+    }
 }
 
 bool RemoveTexturePatch(ErrorFunc errFunc) {
@@ -146,4 +156,114 @@ int ShareTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc) 
     g_glIsPatched = true;
     VRMOD_LOG_INFO("Texture hook patch applied.");
     return 0;
+}
+
+// ── Capture texture support (for clean submit path) ──
+// Mirrors ShareTexture but targets g_captureTexture and sets steal flag
+// so the engine's glGen for the capture RT is recorded.
+int ShareCaptureTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc) {
+    if (glIsTexture(g_captureTexture)) {
+        glDeleteTextures(1, &g_captureTexture);
+        g_captureTexture = 0;
+        glFlush();
+    }
+
+    // Pre-allocate a texture of the *final* size the caller (Lua) will use for the capture RT.
+    // Unlike the main Share path (which passes "per-eye-ish" and does *2 inside), the capture
+    // path is passed the packed size (or we compute here). We use the passed size directly.
+    glGenTextures(1, &g_captureTexture);
+    glBindTexture(GL_TEXTURE_2D, g_captureTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        texWidth,
+        texHeight,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        nullptr
+    );
+
+    GLfloat borderColor[4] = {0,0,0,0};
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Re-arm the patch (main path may have removed it) so the *next* glGen hits our hook
+    // and we can divert to g_captureTexture via the g_captureStealActive flag.
+    if (g_glIsPatched) {
+        // already patched from a previous begin without finish; just enable steal
+        g_captureStealActive = true;
+        VRMOD_LOG_INFO("Capture steal re-armed (patch already active).");
+        return 0;
+    }
+
+    uint8_t patch[HOOK_SIZE];
+    void* hookAddr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CreateTextureHook));
+    BuildCreateTextureHookPatch(hookAddr, patch);
+
+    uintptr_t addr = reinterpret_cast<uintptr_t>(g_createTexture);
+    size_t pageSize = getpagesize();
+    uintptr_t startPg = addr & ~(pageSize - 1);
+    uintptr_t endPg = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+    size_t length = endPg - startPg;
+
+    if (mprotect(reinterpret_cast<void*>(startPg), length, PROT_READ|PROT_WRITE|PROT_EXEC) == -1) {
+        if (errFunc) errFunc("VRMOD: mprotect RWX failed for capture");
+        return -1;
+    }
+
+    memcpy(g_createTextureOrigBytes, reinterpret_cast<void*>(addr), HOOK_SIZE);
+    memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
+
+    g_glIsPatched = true;
+    g_captureStealActive = true;
+    VRMOD_LOG_INFO("Capture texture pre-allocated and hook armed for capture steal.");
+    return 0;
+}
+
+bool ShareCaptureTextureFinish(ErrorFunc errFunc) {
+    g_captureStealActive = false;
+
+    if (!g_glIsPatched) {
+        VRMOD_LOG_INFO("Capture: patch not active at finish.");
+        return true;
+    }
+
+    // Remove patch (same as main path) so normal engine glGen is not hooked after capture setup.
+    uintptr_t addr = reinterpret_cast<uintptr_t>(g_createTexture);
+    size_t pageSize = getpagesize();
+    uintptr_t start = addr & ~(pageSize - 1);
+    uintptr_t end = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+    size_t len = end - start;
+
+    if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        if (errFunc) errFunc("VRMOD: Failed mprotect for capture unpatch.");
+        return false;
+    }
+
+    std::memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
+
+    if (std::memcmp((void*)addr, g_createTextureOrigBytes, HOOK_SIZE) != 0) {
+        if (errFunc) errFunc("VRMOD: Capture unpatch verify failed.");
+        mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+        return false;
+    }
+
+    if (mprotect((void*)start, len, PROT_READ | PROT_EXEC) != 0) {
+        if (errFunc) errFunc("VRMOD: Failed reset prot after capture unpatch.");
+        return false;
+    }
+
+    g_glIsPatched = false;
+    VRMOD_LOG_INFO("Capture texture ready (steal finished, patch removed). id=%u", g_captureTexture);
+    return true;
 }

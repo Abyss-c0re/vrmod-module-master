@@ -7,8 +7,6 @@
 #include <climits>
 #include <algorithm>
 
-#include <openvr/openvr.h>
-
 #define MAX_STR_LEN     256
 #define MAX_ACTIONS     64
 #define MAX_ACTIONSETS  16
@@ -33,8 +31,15 @@ enum ELuaRefIndex {
     LuaRefIndex_Max,
 };
 
+// Runtime-agnostic action handle (works for both OpenVR and OpenXR)
+typedef uint64_t VRActionHandle;
+typedef uint64_t VRActionSetHandle;
+
+#define VRMOD_INVALID_ACTION_HANDLE 0
+#define VRMOD_INVALID_ACTIONSET_HANDLE 0
+
 struct action {
-    vr::VRActionHandle_t handle;
+    VRActionHandle handle;
     char fullname[MAX_STR_LEN];
     int luaRefs[2];
     char* name;
@@ -42,7 +47,7 @@ struct action {
 };
 
 struct actionSet {
-    vr::VRActionSetHandle_t handle;
+    VRActionSetHandle handle;
     char name[MAX_STR_LEN];
 };
 
@@ -53,5 +58,3 @@ struct PoseResult {
     float angvel[3];
     bool valid;
 };
-
-PoseResult ConvertPose(const vr::TrackedDevicePose_t& pose);

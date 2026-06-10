@@ -73,7 +73,6 @@ elif command -v pacman >/dev/null 2>&1; then
 
 else
     echo "[!] Unsupported package manager."
-    echo "Please install the dependencies manually. See integration_plan.md for the list."
     echo "Typical packages needed:"
     echo "  - build tools: cmake, pkg-config, wget, unzip"
     echo "  - OpenGL/X11: libgl, libx11, libxrandr, libxinerama, libxcursor, libxi (dev versions)"
@@ -88,5 +87,4 @@ echo "  ./build.sh"
 echo
 echo "This will download any remaining vendored headers (GMod module base, OpenVR, OpenXR)"
 echo "and build the release module into install/GarrysMod/garrysmod/lua/bin/"
-echo
-echo "For the full list of dependencies and manual instructions, see integration_plan.md"
+

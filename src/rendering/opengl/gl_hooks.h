@@ -47,3 +47,9 @@ bool RemoveTexturePatch(ErrorFunc errFunc);
 // ── Shared texture lifecycle (unchanged logic) ──
 // Returns 0 on success, calls errFunc on failure.
 int ShareTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc);
+
+// ── Capture texture (clean side-by-side RT for submit, no overlays) ──
+extern GLuint g_captureTexture;
+
+int ShareCaptureTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc);
+bool ShareCaptureTextureFinish(ErrorFunc errFunc);  // note: name collides with LUA wrapper in other TU; use :: when calling from Lua bridge

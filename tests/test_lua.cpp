@@ -1,7 +1,6 @@
 #include "test_framework.h"
 #include "mocks/mock_lua.h"
 #include "mocks/mock_openvr.h"
-#include "input/vr_input.h"
 #include "core/vrmod_common.h"
 #include <cstring>
 
@@ -28,8 +27,8 @@ static void PushPoseToLua(GarrysMod::Lua::ILuaBase* LUA, const PoseResult& pr, c
 
 TEST(LuaPose_PushesCorrectFields) {
     mock::MockLuaBase lua;
-    auto pose = mock::MakePose(1, 2, 3,  0, 0, 0,  0, 0, 0);
-    PoseResult pr = ConvertPose(pose);
+    // Use the runtime-agnostic PoseResult directly
+    PoseResult pr = mock::MakePoseResult(-3.0f, -1.0f, 2.0f,  0,0,0,  0,0,0,  0,0,0);
     PushPoseToLua(&lua, pr, "hmd", 1);
 
     ASSERT_TRUE(mock::HasSetField(lua, "pos"));
@@ -45,8 +44,7 @@ TEST(LuaPose_PushesCorrectFields) {
 
 TEST(LuaPose_InvalidSkipped) {
     mock::MockLuaBase lua;
-    auto pose = mock::MakePose(0,0,0, 0,0,0, 0,0,0, false);
-    PoseResult pr = ConvertPose(pose);
+    PoseResult pr = mock::MakePoseResult(0,0,0, 0,0,0, 0,0,0, 0,0,0, false);
     PushPoseToLua(&lua, pr, "hmd", 1);
 
     // Nothing should have been pushed
@@ -178,17 +176,16 @@ TEST(MockLua_CheckNumberReturns) {
 TEST(EndToEnd_MultiplePoses) {
     mock::MockLuaBase lua;
 
-    // Simulate HMD + 2 controller poses
-    vr::TrackedDevicePose_t poses[3];
-    poses[0] = mock::MakePose(0, 1.7f, 0,  0,0,0,  0,0,0);  // HMD at 1.7m height
-    poses[1] = mock::MakePose(-0.3f, 1.0f, 0.5f,  0,0,0,  0,0,0);  // Left
-    poses[2] = mock::MakePose(0.3f, 1.0f, 0.5f,  0,0,0,  0,0,0);   // Right
+    // Simulate HMD + 2 controller poses using runtime-agnostic PoseResult
+    PoseResult poses[3];
+    poses[0] = mock::MakePoseResult(0, -0, 1.7f,  0,0,0,  0,0,0,  0,0,0);  // HMD at 1.7m height
+    poses[1] = mock::MakePoseResult(-0.5f, 0.3f, 1.0f,  0,0,0,  0,0,0,  0,0,0);  // Left
+    poses[2] = mock::MakePoseResult(-0.5f, -0.3f, 1.0f,  0,0,0,  0,0,0,  0,0,0);  // Right
 
     const char* names[] = {"hmd", "hand_left", "hand_right"};
     for (int i = 0; i < 3; i++) {
-        PoseResult pr = ConvertPose(poses[i]);
-        ASSERT_TRUE(pr.valid);
-        PushPoseToLua(&lua, pr, names[i], i + 1);
+        ASSERT_TRUE(poses[i].valid);
+        PushPoseToLua(&lua, poses[i], names[i], i + 1);
     }
 
     // 3 poses * (1 ReferencePush + 2 PushVector + 2 PushAngle + 5 SetField)

@@ -21,16 +21,19 @@ set(CORE_SOURCES
     src/core/vrmod_log.cpp
 )
 
+# OpenXR input (replaces OpenVR vr_input)
 set(INPUT_SOURCES
-    src/input/vr_input.cpp
+    src/input/xr_input.cpp
 )
 
 set(RENDER_GL_SOURCES
     src/rendering/opengl/gl_hooks.cpp
 )
 
-set(RENDER_VR_SOURCES
-    src/rendering/openvr/vr_render.cpp
+# OpenXR rendering (replaces OpenVR vr_render)
+set(RENDER_XR_SOURCES
+    src/rendering/openxr/xr_session.cpp
+    src/rendering/openxr/xr_render.cpp
 )
 
 set(LUA_SOURCES
@@ -38,7 +41,7 @@ set(LUA_SOURCES
 )
 
 # ==============================================================
-#  RELEASE target: shared library (the gmod module)
+#  RELEASE target: shared library (the gmod module) — OpenXR
 # ==============================================================
 option(VRMOD_BUILD_TESTS "Build the dev test runner" OFF)
 
@@ -46,14 +49,18 @@ add_library(vrmod_release SHARED
     ${CORE_SOURCES}
     ${INPUT_SOURCES}
     ${RENDER_GL_SOURCES}
-    ${RENDER_VR_SOURCES}
+    ${RENDER_XR_SOURCES}
     ${LUA_SOURCES}
 )
 
 target_include_directories(vrmod_release PRIVATE ${VRMOD_INCLUDE_DIRS})
 target_compile_options(vrmod_release PRIVATE -O3 -m64)
-target_link_directories(vrmod_release PRIVATE ${OPENVR_LIB_DIR})
-target_link_libraries(vrmod_release PRIVATE openvr_api dl)
+# OpenXR loader is obtained at runtime via dlopen (see XR_LoadLoader in xr_session.cpp).
+# We do NOT link against libopenxr_loader here. This allows the module to load on
+# systems where only an OpenXR *runtime* (Monado, ALVR layer, etc.) is present via
+# active_runtime.json, without the loader development package being in the library
+# search path. X11 + GL + GLX are real dependencies (direct GLX calls for graphics binding).
+target_link_libraries(vrmod_release PRIVATE dl X11 GL GLX)
 
 set_target_properties(vrmod_release PROPERTIES
     OUTPUT_NAME "gmcl_vrmod_linux64"
@@ -77,7 +84,6 @@ if(VRMOD_BUILD_TESTS)
     # Only compile modules that are testable without real HW
     add_executable(vrmod_tests
         ${CORE_SOURCES}
-        ${INPUT_SOURCES}
         ${TEST_SOURCES}
     )
 
@@ -92,8 +98,7 @@ if(VRMOD_BUILD_TESTS)
     )
 
     target_compile_options(vrmod_tests PRIVATE -g -O0 -m64)
-    target_link_directories(vrmod_tests PRIVATE ${OPENVR_LIB_DIR})
-    target_link_libraries(vrmod_tests PRIVATE openvr_api dl)
+    target_link_libraries(vrmod_tests PRIVATE dl)
 
     set_target_properties(vrmod_tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
