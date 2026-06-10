@@ -42,6 +42,12 @@ void XR_RefreshHMDPose() {
 extern GLuint g_captureTexture;
 extern GLuint g_sharedTexture;  // the original eye RT one, for fallback within RT-tex path only
 
+// FBO + authoritative color texture discovered by observing glFramebufferTexture2D during
+// the ShareTextureBegin/Finish window. Querying the attachment on this FBO at submit time
+// gives us the texture the engine is actually rendering the two RenderViews into.
+extern GLuint g_vrRtFBO;
+extern GLuint g_vrRtColorTex;
+
 // OpenXR OpenGL swapchain image type
 #define XR_USE_GRAPHICS_API_OPENGL
 #include <openxr/openxr/openxr.h>
@@ -71,6 +77,7 @@ static PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatusPtr = nullptr;
 static PFNGLCOPYIMAGESUBDATAPROC   glCopyImageSubDataPtr = nullptr;
 static PFNGLACTIVETEXTUREPROC      glActiveTexturePtr = nullptr;
 static PFNGLUSEPROGRAMPROC         glUseProgramPtr = nullptr;
+static PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC glGetFramebufferAttachmentParameterivPtr = nullptr;
 
 static bool LoadGLExtensions() {
     if (glGenFramebuffersPtr) return true;  // Already loaded
@@ -84,6 +91,8 @@ static bool LoadGLExtensions() {
     glCopyImageSubDataPtr = (PFNGLCOPYIMAGESUBDATAPROC)glXGetProcAddress((const GLubyte*)"glCopyImageSubData");
     glActiveTexturePtr = (PFNGLACTIVETEXTUREPROC)glXGetProcAddress((const GLubyte*)"glActiveTexture");
     glUseProgramPtr = (PFNGLUSEPROGRAMPROC)glXGetProcAddress((const GLubyte*)"glUseProgram");
+    glGetFramebufferAttachmentParameterivPtr = (PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC)
+        glXGetProcAddress((const GLubyte*)"glGetFramebufferAttachmentParameteriv");
 
     if (!glGenFramebuffersPtr || !glBindFramebufferPtr || !glFramebufferTexture2DPtr ||
         !glBlitFramebufferPtr || !glCheckFramebufferStatusPtr) {
@@ -309,13 +318,39 @@ XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureB
     // second RT) as a "clean snapshot", but that extra copy can end up blank or stale.
     // Per requirement: submit directly from the addon's generated RT via the stolen path.
     GLuint srcTex = stolenTexture;
+
+    // If we observed the FBO that the engine set up for the VR RT (via glFramebufferTexture2D
+    // during the share window), query its current COLOR_ATTACHMENT0. This gives the live,
+    // authoritative texture backing the RT regardless of whether the glGenTextures vtable
+    // patch at firstFunc+50 inside togl ever saw the allocation.
+    if (g_vrRtFBO != 0 && glBindFramebufferPtr && glGetFramebufferAttachmentParameterivPtr) {
+        GLint prevFB = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFB);
+
+        glBindFramebufferPtr(GL_DRAW_FRAMEBUFFER, g_vrRtFBO);
+        GLint attached = 0;
+        glGetFramebufferAttachmentParameterivPtr(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE, &attached);
+        glBindFramebufferPtr(GL_DRAW_FRAMEBUFFER, prevFB);
+
+        if (attached != 0 && glIsTexture((GLuint)attached)) {
+            if ((GLuint)attached != srcTex) {
+                static int s_fboResolveLog = 0;
+                if ((s_fboResolveLog++ % 120) == 0) {
+                    VRMOD_LOG_INFO("Submit: resolved srcTex=%u from remembered VR RT FBO %u (stolen was %u)",
+                        (GLuint)attached, g_vrRtFBO, srcTex);
+                }
+            }
+            srcTex = (GLuint)attached;
+        }
+    }
+
     if (g_captureTexture && glIsTexture(g_captureTexture)) {
         // Capture is still updated for other uses / future, but we deliberately use the
         // direct stolen one that the addon rendered the views into.
         // (If you want to force capture for debug, swap the line above.)
     }
     if ((s_submitCallCount % 30) == 0) {
-        VRMOD_LOG_INFO("Submit using srcTex=%u (DIRECT from addon's generated RT via stolenTexture; capture var=%u)", srcTex, g_captureTexture);
+        VRMOD_LOG_INFO("Submit using srcTex=%u (DIRECT from addon's generated RT via stolenTexture; capture var=%u, rtFBO=%u)", srcTex, g_captureTexture, g_vrRtFBO);
     }
 
     // Query dimensions from the texture we will actually attach/blit (capture preferred).

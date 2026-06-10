@@ -51,5 +51,11 @@ int ShareTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc);
 // ── Capture texture (clean side-by-side RT for submit, no overlays) ──
 extern GLuint g_captureTexture;
 
+// Discovered via framebuffer attachment observation during the share window.
+// This is more reliable than the glGenTextures vtable patch alone when the engine
+// (togl / GetRenderTargetEx) allocates RT backing stores through internal paths.
+extern GLuint g_vrRtFBO;
+extern GLuint g_vrRtColorTex;
+
 int ShareCaptureTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc);
 bool ShareCaptureTextureFinish(ErrorFunc errFunc);  // note: name collides with LUA wrapper in other TU; use :: when calling from Lua bridge

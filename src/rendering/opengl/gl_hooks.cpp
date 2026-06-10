@@ -14,6 +14,15 @@ COpenGLEntryPoints* g_GL = NULL;
 bool                g_glIsPatched = false;
 bool                g_captureStealActive = false;
 
+// Framebuffer attachment observation (used to discover the actual color texture backing
+// the VR RT created by GetRenderTargetEx, which may bypass the glGenTextures vtable slot).
+char                g_framebufferTexOrigBytes[14];
+void*               g_framebufferTexture2D = NULL;
+bool                g_fbIsPatched = false;
+
+GLuint              g_vrRtFBO = 0;
+GLuint              g_vrRtColorTex = 0;
+
 void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
     uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
     uint32_t low  = static_cast<uint32_t>(addr & 0xFFFFFFFF);
@@ -45,6 +54,51 @@ void CreateTextureHook(GLsizei n, GLuint *textures) {
     }
     if (g_captureStealActive) {
         g_captureTexture = textures[0];
+    }
+}
+
+// One-shot / windowed hook for glFramebufferTexture2D (resolved via glXGetProcAddress).
+// While the steal window is open we record attachments to COLOR_ATTACHMENT0; this catches
+// the actual texture the engine intends to render into for the RT even when the GenTextures
+// vtable slot inside togl does not see the RT's backing allocation.
+void FramebufferTextureHook(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    // Restore real bytes so the original function can run.
+    if (g_framebufferTexture2D) {
+        memcpy((void*)g_framebufferTexture2D, (void*)g_framebufferTexOrigBytes, HOOK_SIZE);
+    }
+
+    // Call the real implementation.
+    typedef void (*glFramebufferTexture2D_t)(GLenum, GLenum, GLenum, GLuint, GLint);
+    ((glFramebufferTexture2D_t)g_framebufferTexture2D)(target, attachment, textarget, texture, level);
+
+    // While a share/capture steal window is active, a COLOR_ATTACHMENT0 with a real texture
+    // almost certainly belongs to the VR side-by-side RT being set up by GetRenderTargetEx.
+    if (g_glIsPatched && attachment == GL_COLOR_ATTACHMENT0 && texture != 0) {
+        g_vrRtColorTex = texture;
+        GLint currentFBO = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &currentFBO);
+        if (currentFBO != 0) {
+            g_vrRtFBO = (GLuint)currentFBO;
+        }
+        VRMOD_LOG_INFO("Framebuffer attach observed: COLOR0 tex=%u fbo=%u (captureSteal=%d)", texture, (unsigned)currentFBO, (int)g_captureStealActive);
+    }
+
+    // Re-arm for the remainder of the short share window so later attachments (or color after depth) are also seen.
+    if (g_glIsPatched && g_framebufferTexture2D) {
+        uint8_t patch[HOOK_SIZE];
+        BuildCreateTextureHookPatch(reinterpret_cast<void*>(
+            reinterpret_cast<uintptr_t>(FramebufferTextureHook)), patch);
+
+        uintptr_t addr = reinterpret_cast<uintptr_t>(g_framebufferTexture2D);
+        size_t pageSize = getpagesize();
+        uintptr_t startPg = addr & ~(pageSize - 1);
+        uintptr_t endPg = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+        size_t len = endPg - startPg;
+
+        if (mprotect(reinterpret_cast<void*>(startPg), len, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
+            g_fbIsPatched = true;
+        }
     }
 }
 
@@ -84,6 +138,23 @@ bool RemoveTexturePatch(ErrorFunc errFunc) {
 
     g_glIsPatched = false;
     VRMOD_LOG_INFO("Texture patch removed successfully.");
+
+    // Also remove the framebuffer observation patch if it is still applied.
+    if (g_fbIsPatched && g_framebufferTexture2D) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(g_framebufferTexture2D);
+        size_t pageSize = getpagesize();
+        uintptr_t start = addr & ~(pageSize - 1);
+        uintptr_t end = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+        size_t len = end - start;
+
+        if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            std::memcpy((void*)addr, g_framebufferTexOrigBytes, HOOK_SIZE);
+            mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+        }
+        g_fbIsPatched = false;
+        VRMOD_LOG_INFO("FramebufferTexture2D observation patch removed.");
+    }
+
     return true;
 }
 
@@ -155,6 +226,42 @@ int ShareTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc) 
 
     g_glIsPatched = true;
     VRMOD_LOG_INFO("Texture hook patch applied.");
+
+    // Arm framebuffer attachment observation in the same window. This is the key to reliably
+    // capturing the texture that GetRenderTargetEx actually wires up as the color target for
+    // the VR RT (the glGenTextures vtable slot at +50 can be bypassed by togl's RT paths).
+    if (!g_fbIsPatched) {
+        if (!g_framebufferTexture2D) {
+            g_framebufferTexture2D = (void*)glXGetProcAddress((const GLubyte*)"glFramebufferTexture2D");
+            if (!g_framebufferTexture2D) {
+                g_framebufferTexture2D = (void*)glXGetProcAddress((const GLubyte*)"glFramebufferTexture2DEXT");
+            }
+        }
+        if (g_framebufferTexture2D) {
+            memcpy(g_framebufferTexOrigBytes, (void*)g_framebufferTexture2D, HOOK_SIZE);
+
+            uint8_t patch[HOOK_SIZE];
+            BuildCreateTextureHookPatch(reinterpret_cast<void*>(
+                reinterpret_cast<uintptr_t>(FramebufferTextureHook)), patch);
+
+            uintptr_t addr = reinterpret_cast<uintptr_t>(g_framebufferTexture2D);
+            size_t pageSize = getpagesize();
+            uintptr_t startPg = addr & ~(pageSize - 1);
+            uintptr_t endPg = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
+            size_t len = endPg - startPg;
+
+            if (mprotect(reinterpret_cast<void*>(startPg), len, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+                memcpy(reinterpret_cast<void*>(addr), patch, HOOK_SIZE);
+                g_fbIsPatched = true;
+                VRMOD_LOG_INFO("FramebufferTexture2D observation hook armed.");
+            } else {
+                VRMOD_LOG_WARN("mprotect RWX failed for framebuffer observation hook");
+            }
+        } else {
+            VRMOD_LOG_WARN("glFramebufferTexture2D not resolved; FBO-based RT discovery unavailable");
+        }
+    }
+
     return 0;
 }
 
@@ -264,6 +371,21 @@ bool ShareCaptureTextureFinish(ErrorFunc errFunc) {
     }
 
     g_glIsPatched = false;
+
+    // Clean up framebuffer observation patch if it was armed for the capture window as well.
+    if (g_fbIsPatched && g_framebufferTexture2D) {
+        uintptr_t faddr = reinterpret_cast<uintptr_t>(g_framebufferTexture2D);
+        size_t fpage = getpagesize();
+        uintptr_t fstart = faddr & ~(fpage - 1);
+        uintptr_t fend = (faddr + HOOK_SIZE + fpage - 1) & ~(fpage - 1);
+        size_t flen = fend - fstart;
+        if (mprotect((void*)fstart, flen, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            std::memcpy((void*)faddr, g_framebufferTexOrigBytes, HOOK_SIZE);
+            mprotect((void*)fstart, flen, PROT_READ | PROT_EXEC);
+        }
+        g_fbIsPatched = false;
+    }
+
     VRMOD_LOG_INFO("Capture texture ready (steal finished, patch removed). id=%u", g_captureTexture);
     return true;
 }

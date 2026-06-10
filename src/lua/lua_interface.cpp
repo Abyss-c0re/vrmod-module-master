@@ -452,7 +452,17 @@ LUA_FUNCTION(ShareTextureFinish) {
         LUA->ThrowError("VRMOD: Failed to remove the texture patch.");
     }
 
-    VRMOD_LOG_INFO("Shared texture ready: GL id=%u", g_sharedTexture);
+    // Promote a texture discovered via FBO COLOR_ATTACHMENT0 during the share window.
+    // The glGenTextures vtable hook can miss the RT backing store (togl internal allocation);
+    // seeing the engine attach a texture as the color target for the RT's FBO is authoritative.
+    if (g_vrRtColorTex != 0 && glIsTexture(g_vrRtColorTex)) {
+        if (g_sharedTexture != g_vrRtColorTex) {
+            VRMOD_LOG_INFO("Promoting VR RT color texture from FBO attach: %u (was %u)", g_vrRtColorTex, g_sharedTexture);
+            g_sharedTexture = g_vrRtColorTex;
+        }
+    }
+
+    VRMOD_LOG_INFO("Shared texture ready: GL id=%u (fbo=%u)", g_sharedTexture, g_vrRtFBO);
     return 0;
 }
 
@@ -507,7 +517,13 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 }
 
 LUA_FUNCTION(SubmitSharedTexture) {
-    if (!g_xrSwapchainsCreated || g_sharedTexture == 0) {
+    // Allow submit when we have either the classic stolen shared texture or a discovered
+    // RT FBO / color tex from framebuffer attachment observation. The submit path will
+    // resolve the best live srcTex from the FBO when available.
+    bool haveUsableSrc = (g_sharedTexture != 0) ||
+                         (g_vrRtColorTex != 0 && glIsTexture(g_vrRtColorTex)) ||
+                         (g_vrRtFBO != 0);
+    if (!g_xrSwapchainsCreated || !haveUsableSrc) {
         // Not ready yet, skip silently
         if (g_xrSessionRunning && !g_xrSwapchainsCreated) {
             // Try to end the frame that was begun in UpdatePosesAndActions
@@ -516,7 +532,11 @@ LUA_FUNCTION(SubmitSharedTexture) {
         return 0;
     }
 
-    XrSubmitResult res = XR_SubmitStolenTexture(g_sharedTexture, g_texBounds);
+    // Pass the best ID we have at the moment; XR_SubmitStolenTexture will re-resolve
+    // from the remembered FBO attachment if possible (more authoritative for the RT).
+    GLuint submitId = g_sharedTexture ? g_sharedTexture :
+                      (g_vrRtColorTex && glIsTexture(g_vrRtColorTex) ? g_vrRtColorTex : g_sharedTexture);
+    XrSubmitResult res = XR_SubmitStolenTexture(submitId, g_texBounds);
     if (!res.ok && res.errMsg[0]) {
         // Only print to Lua on new errors (dedup happens in the log layer)
         LuaPrint(LUA, res.errMsg);
