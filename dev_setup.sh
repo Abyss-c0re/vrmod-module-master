@@ -85,6 +85,6 @@ echo "=== Setup complete! ==="
 echo "You can now run:"
 echo "  ./build.sh"
 echo
-echo "This will download any remaining vendored headers (GMod module base, OpenVR, OpenXR)"
+echo "This will download any remaining vendored headers (GMod module base, OpenXR)"
 echo "and build the release module into install/GarrysMod/garrysmod/lua/bin/"
 

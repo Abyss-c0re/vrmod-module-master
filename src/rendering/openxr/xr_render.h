@@ -22,7 +22,7 @@ struct XrSubmitResult {
 
 XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureBounds[8]);
 
-// ── Recommended size (matches OpenVR API) ──
+// ── Recommended size ──
 extern uint32_t g_xrSwapchainWidth;
 extern uint32_t g_xrSwapchainHeight;
 

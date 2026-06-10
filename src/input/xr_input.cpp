@@ -32,12 +32,11 @@ static void QuatToRotMat(const XrQuaternionf& q, float m[3][3]) {
     m[2][2] = 1.0f - 2.0f * (xx + yy);
 }
 
-// ── Convert pose using the same matrix extraction as the original OpenVR ConvertPose
-// after applying the identical basis change (pos mapping was already -z, -x, +y).
-// This makes HMD tracking (pos + especially angles) match the working OpenVR baseline.
+// ── Convert pose using the same matrix extraction and basis change as the prior implementation.
+// (pos mapping: -z, -x, +y). This preserves the HMD tracking behavior the Lua side expects.
 static void ConvertRotToSourceAng(const float m[3][3], float ang[3]) {
-    // Same extraction as vr_input.cpp ConvertPose using the transformed rot matrix
-    // (m[row][col] layout matching the old HmdMatrix34 rot part).
+    // Same extraction as the prior ConvertPose using the transformed rot matrix
+    // (m[row][col] layout matching the previous HmdMatrix34 rot part).
     // The M * Rxr * M^T reorients the XR rotation into the Source basis.
     // Because of the 90-degree axis permutation in M, the meaning of the three
     // extracted values (p/y/r) gets cycled relative to Source pitch/yaw/roll.
@@ -80,13 +79,13 @@ PoseResult ConvertXrPose(const XrSpaceLocation& loc) {
 
     // OpenXR: x=right, y=up, z=back (towards user)
     // Source engine (GMod): x=forward, y=left, z=up
-    // Mapping (same as original OpenVR ConvertPose): src_x = -xr_z, src_y = -xr_x, src_z = xr_y
+    // Mapping (preserved from prior implementation): src_x = -xr_z, src_y = -xr_x, src_z = xr_y
     r.pos[0] = -loc.pose.position.z;
     r.pos[1] = -loc.pose.position.x;
     r.pos[2] =  loc.pose.position.y;
 
     // Convert orientation using basis change + the *exact same* angle extraction
-    // formulas as the working OpenVR path. This fixes broken/wrong rotation tracking.
+    // formulas as the prior implementation. This preserves correct rotation tracking.
     float Rxr[3][3];
     QuatToRotMat(loc.pose.orientation, Rxr);
 

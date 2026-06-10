@@ -23,7 +23,7 @@ static bool g_IsPaused = false;
 static bool g_xrInitialized = false;
 static bool g_xrSwapchainsCreated = false;
 
-// ── Texture bounds (stored the same way as OpenVR for Lua compat) ──
+// ── Texture bounds (stored for Lua compatibility) ──
 static float g_texBounds[8] = {0}; // left uMin,vMin,uMax,vMax, right uMin,vMin,uMax,vMax
 
 // ── Action state ──
@@ -68,7 +68,7 @@ static void PushMatrixAsTable(GarrysMod::Lua::ILuaBase* LUA, float* mtx, unsigne
 }
 
 // ── LUA_FUNCTIONs ──
-// All function signatures and return values are preserved exactly as the OpenVR version.
+// All function signatures and return values are preserved for Lua API compatibility.
 
 LUA_FUNCTION(GetVersion) {
     LUA->PushNumber(23);
@@ -137,7 +137,7 @@ LUA_FUNCTION(Init) {
         g_luaRefCount++;
     }
 
-    // Get GL entry points for texture hook (same as OpenVR path)
+    // Get GL entry points for texture hook
     void* lib = dlopen("libtogl_client.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) LUA->ThrowError("VRMOD: dlopen failed");
 

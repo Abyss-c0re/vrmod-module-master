@@ -348,7 +348,7 @@ bool XR_Init(char* errMsg, int errMsgLen) {
     uint32_t rawEyeW = vcViews[0].recommendedImageRectWidth;
     uint32_t rawEyeH = vcViews[0].recommendedImageRectHeight;
 
-    // Compute per-eye size with the 4096 total-width style clamp (matches old OpenVR behavior).
+    // Compute per-eye size with the 4096 total-width style clamp (for compatibility with existing Lua side-by-side RT handling).
     const uint32_t maxTexSize = 4096;
     uint32_t totalWidth = rawEyeW * 2;
     float wScale = (float)maxTexSize / totalWidth;
@@ -359,7 +359,7 @@ bool XR_Init(char* errMsg, int errMsgLen) {
     uint32_t eyeH = (uint32_t)(rawEyeH * scaleFactor);
 
     // g_xrRecommended* kept as per-eye (what ShareTextureBegin receives, and what *2 inside gl_hooks
-    // produces for the packed side-by-side RT). This matches the old OpenVR contract.
+    // produces for the packed side-by-side RT). This preserves the existing Lua-side contract.
     g_xrRecommendedWidth = eyeW;
     g_xrRecommendedHeight = eyeH;
 

@@ -7,7 +7,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── Paths ──
 set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
-set(OPENVR_LIB_DIR "${DEPS_DIR}/openvr/lib_linux64")
 set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/install/GarrysMod/garrysmod/lua/bin")
 
 # ── Include dirs (used by both targets) ──
@@ -21,7 +20,6 @@ set(CORE_SOURCES
     src/core/vrmod_log.cpp
 )
 
-# OpenXR input (replaces OpenVR vr_input)
 set(INPUT_SOURCES
     src/input/xr_input.cpp
 )
@@ -30,7 +28,6 @@ set(RENDER_GL_SOURCES
     src/rendering/opengl/gl_hooks.cpp
 )
 
-# OpenXR rendering (replaces OpenVR vr_render)
 set(RENDER_XR_SOURCES
     src/rendering/openxr/xr_session.cpp
     src/rendering/openxr/xr_render.cpp

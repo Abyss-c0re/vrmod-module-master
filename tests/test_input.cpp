@@ -1,5 +1,5 @@
 #include "test_framework.h"
-#include "mocks/mock_openvr.h"
+#include "mocks/mock_pose.h"
 #include "core/vrmod_common.h"
 #include <cstdio>
 #include <cstring>

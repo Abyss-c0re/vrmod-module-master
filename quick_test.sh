@@ -23,6 +23,13 @@ LIVE_BIN="$GAME_DIR/garrysmod/lua/bin/gmcl_vrmod_linux64.dll"
 LIVE_CFG_DIR="$GAME_DIR/garrysmod/cfg"
 DEV_DLL="install/GarrysMod/garrysmod/lua/bin/gmcl_vrmod_linux64.dll"
 
+# Clean logs on each start (as requested). Truncate module debug log and engine console.log
+# so each quick test cycle starts with a fresh, easy-to-read log.
+echo "Cleaning logs for this test run (vrmod_debug.log + console.log)..."
+> "$GAME_DIR/vrmod_debug.log" 2>/dev/null || true
+> "$GAME_DIR/garrysmod/console.log" 2>/dev/null || true
+echo "Logs cleaned."
+
 if [[ ! -f "$DEV_DLL" ]]; then
   echo "ERROR: $DEV_DLL not found after build"
   exit 1

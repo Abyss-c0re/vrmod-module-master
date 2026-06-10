@@ -31,7 +31,7 @@ enum ELuaRefIndex {
     LuaRefIndex_Max,
 };
 
-// Runtime-agnostic action handle (works for both OpenVR and OpenXR)
+// Runtime-agnostic action handle
 typedef uint64_t VRActionHandle;
 typedef uint64_t VRActionSetHandle;
 

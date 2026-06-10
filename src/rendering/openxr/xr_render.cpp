@@ -69,6 +69,8 @@ static PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2DPtr = nullptr;
 static PFNGLBLITFRAMEBUFFERPROC    glBlitFramebufferPtr = nullptr;
 static PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatusPtr = nullptr;
 static PFNGLCOPYIMAGESUBDATAPROC   glCopyImageSubDataPtr = nullptr;
+static PFNGLACTIVETEXTUREPROC      glActiveTexturePtr = nullptr;
+static PFNGLUSEPROGRAMPROC         glUseProgramPtr = nullptr;
 
 static bool LoadGLExtensions() {
     if (glGenFramebuffersPtr) return true;  // Already loaded
@@ -80,6 +82,8 @@ static bool LoadGLExtensions() {
     glBlitFramebufferPtr = (PFNGLBLITFRAMEBUFFERPROC)glXGetProcAddress((const GLubyte*)"glBlitFramebuffer");
     glCheckFramebufferStatusPtr = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)glXGetProcAddress((const GLubyte*)"glCheckFramebufferStatus");
     glCopyImageSubDataPtr = (PFNGLCOPYIMAGESUBDATAPROC)glXGetProcAddress((const GLubyte*)"glCopyImageSubData");
+    glActiveTexturePtr = (PFNGLACTIVETEXTUREPROC)glXGetProcAddress((const GLubyte*)"glActiveTexture");
+    glUseProgramPtr = (PFNGLUSEPROGRAMPROC)glXGetProcAddress((const GLubyte*)"glUseProgram");
 
     if (!glGenFramebuffersPtr || !glBindFramebufferPtr || !glFramebufferTexture2DPtr ||
         !glBlitFramebufferPtr || !glCheckFramebufferStatusPtr) {
@@ -310,7 +314,9 @@ XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureB
         // direct stolen one that the addon rendered the views into.
         // (If you want to force capture for debug, swap the line above.)
     }
-    VRMOD_LOG_INFO("Submit using srcTex=%u (DIRECT from addon's generated RT via stolenTexture param; the RT that PerformRenderViews + RenderView wrote the two eyes into. capture var=%u)", srcTex, g_captureTexture);
+    if ((s_submitCallCount % 30) == 0) {
+        VRMOD_LOG_INFO("Submit using srcTex=%u (DIRECT from addon's generated RT via stolenTexture; capture var=%u)", srcTex, g_captureTexture);
+    }
 
     // Query dimensions from the texture we will actually attach/blit (capture preferred).
     GLint srcWidth = 0, srcHeight = 0;
@@ -489,6 +495,14 @@ XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureB
                     glDisable(GL_DEPTH_TEST);
                     glDisable(GL_CULL_FACE);
                     glDisable(GL_BLEND);
+
+                    // Force fixed-function pipeline. The engine (or previous RenderView) may have
+                    // left a GLSL program bound. Without this, glEnable(GL_TEXTURE_2D) + glBegin(GL_QUADS)
+                    // + glTexCoord + glTexEnv REPLACE often draws nothing (black dst) even though the
+                    // srcTex had valid content (the detection ReadPixels sees it because it bypasses texturing).
+                    // This is the classic reason "GOOD logs + quad complete logs + EndFrame ok" but HMD is black.
+                    if (glActiveTexturePtr) glActiveTexturePtr(GL_TEXTURE0);
+                    if (glUseProgramPtr) glUseProgramPtr(0);
                     glEnable(GL_TEXTURE_2D);
                     glBindTexture(GL_TEXTURE_2D, srcTex);
 
@@ -516,6 +530,27 @@ XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureB
                         glTexCoord2f(u0, 1.0f); glVertex2f(-1.0f,  1.0f);
                     glEnd();
 
+                    // Ensure the textured quad has actually rasterized into the attached dst swap image
+                    // before we release it to the runtime. glFlush alone is often not enough in this path.
+                    glFinish();
+
+                    // === Post-copy verification on the *dst* (the actual image we submit) ===
+                    // This is the key to "logs lie": src detection can be GOOD, quad can "complete"
+                    // with no errors, but if the draw didn't write pixels (shader still bound, etc.)
+                    // the swap image stays black and HMD is black. Sampling the dst after the draw
+                    // tells us whether the transfer succeeded.
+                    {
+                        unsigned char dstSample[4] = {0};
+                        glReadBuffer(GL_COLOR_ATTACHMENT0);
+                        glReadPixels(g_xrSwapchainWidth / 2, g_xrSwapchainHeight / 2, 1, 1,
+                                     GL_RGBA, GL_UNSIGNED_BYTE, dstSample);
+                        int dstSum = (int)dstSample[0] + dstSample[1] + dstSample[2];
+                        if (eye == 0) {
+                            VRMOD_LOG_INFO("POST-COPY dst eye0 center sample: (%u,%u,%u) sum=%d  (if 0 while src was GOOD, the quad draw did not transfer content)",
+                                dstSample[0], dstSample[1], dstSample[2], dstSum);
+                        }
+                    }
+
                     // Restore state
                     glBindTexture(GL_TEXTURE_2D, prevTex);
                     glMatrixMode(GL_PROJECTION);
@@ -535,7 +570,7 @@ XrSubmitResult XR_SubmitStolenTexture(GLuint stolenTexture, const float textureB
                         VRMOD_LOG_INFO("QUAD DRAW submission eye0 from addon's RT (stolenTex=%u) %dx%d half u[%.1f-%.1f] -> dst %ux%u",
                             srcTex, srcWidth, srcHeight, u0, u1, g_xrSwapchainWidth, g_xrSwapchainHeight);
                     }
-                    if (eye == 0) {
+                    if (eye == 0 && (s_submitCallCount % 30) == 0) {
                         VRMOD_LOG_INFO("quad eye0 complete FBOs src=%u dst=%u half u[%.1f-%.1f] swap=%ux%u (from addon's RenderView RT, quad path)",
                             srcTex, dstTexture, u0, u1, g_xrSwapchainWidth, g_xrSwapchainHeight);
                     }
