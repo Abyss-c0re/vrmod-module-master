@@ -33,8 +33,10 @@ static constexpr float kHmdSmoothCutoffSpeed = 0.35f; // m/s in Source units aft
 
 void UpdateRecommendedSize() {
     g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
-    // Cap SBS for shared-image memory (4096 → 0x0 alloc fail)
-    const int maxTexSize = 2048;
+    // Linux/ToGL shared-image path: allow up to 4096 on the SBS dimension.
+    // (2048 was a hard potato cap — half HMD res on many headsets.)
+    // Still clamp so width*2 and height both fit in 4096.
+    const int maxTexSize = 4096;
     uint32_t eyeWidth = recommendedWidth;
     uint32_t eyeHeight = recommendedHeight;
     uint32_t totalWidth = eyeWidth * 2;
@@ -45,7 +47,9 @@ void UpdateRecommendedSize() {
     recommendedHeight = (uint32_t)(eyeHeight * scaleFactor);
     if (recommendedWidth < 16) recommendedWidth = 512;
     if (recommendedHeight < 16) recommendedHeight = 512;
-    VRMOD_LOG_DEBUG("UpdateRecommendedSize: %u x %u", recommendedWidth, recommendedHeight);
+    VRMOD_LOG_INFO("UpdateRecommendedSize: eye %ux%u (SBS %ux%u, cap %d)",
+                   recommendedWidth, recommendedHeight,
+                   recommendedWidth * 2, recommendedHeight, maxTexSize);
 }
 
 void TickRenderQualityLadder() {

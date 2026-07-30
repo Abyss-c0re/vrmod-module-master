@@ -309,10 +309,36 @@ LUA_FUNCTION(ShareTextureBegin) {
             snprintf(s_lastShareErr, sizeof(s_lastShareErr), "%s", msg);
     };
 
-    UpdateRecommendedSize();
+    // Optional eye W/H from Lua (supersample). No new export — optional args only.
+    // VRMOD_ShareTextureBegin() or VRMOD_ShareTextureBegin(eyeW, eyeH)
+    uint32_t eyeW, eyeH;
+    if (LUA->Top() >= 2 && LUA->IsType(1, GarrysMod::Lua::Type::NUMBER)
+                        && LUA->IsType(2, GarrysMod::Lua::Type::NUMBER)) {
+        double w = LUA->GetNumber(1);
+        double h = LUA->GetNumber(2);
+        if (w < 16.0) w = 16.0;
+        if (h < 16.0) h = 16.0;
+        if (w > 4096.0) w = 4096.0;
+        if (h > 4096.0) h = 4096.0;
+        // Keep SBS width within 4096
+        if (w * 2.0 > 4096.0) {
+            double s = 4096.0 / (w * 2.0);
+            w *= s;
+            h *= s;
+        }
+        eyeW = (uint32_t)(w + 0.5);
+        eyeH = (uint32_t)(h + 0.5);
+        recommendedWidth = eyeW;
+        recommendedHeight = eyeH;
+    } else {
+        UpdateRecommendedSize();
+        eyeW = recommendedWidth;
+        eyeH = recommendedHeight;
+    }
+
     VRMOD_LOG_INFO("ShareTextureBegin eye=%ux%u createTex=%p",
-                   recommendedWidth, recommendedHeight, g_createTexture);
-    int rc = ShareTextureBegin(recommendedWidth, recommendedHeight, errBridge);
+                   eyeW, eyeH, g_createTexture);
+    int rc = ShareTextureBegin(eyeW, eyeH, errBridge);
     if (rc != 0) {
         char buf[320];
         snprintf(buf, sizeof(buf), "VRMOD: ShareTextureBegin failed: %s",

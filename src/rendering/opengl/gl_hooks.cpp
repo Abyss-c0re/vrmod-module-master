@@ -169,8 +169,9 @@ void CreateTextureHook(GLsizei n, GLuint* textures) {
 static GLuint AllocRGBA8(uint32_t w, uint32_t h) {
     if (w < 16) w = 1024;
     if (h < 16) h = 1024;
-    if (w > 2048) w = 2048;
-    if (h > 2048) h = 2048;
+    // Match UpdateRecommendedSize / Lua Linux clamp (4096 SBS max)
+    if (w > 4096) w = 4096;
+    if (h > 4096) h = 4096;
 
     if (g_glIsPatched) RemoveTexturePatch(nullptr);
 
@@ -227,11 +228,17 @@ int ShareTextureBegin(uint32_t eyeW, uint32_t eyeH, ErrorFunc errFunc) {
     if (eyeH == 0) eyeH = 1024;
     uint32_t sbsW = eyeW * 2;
     uint32_t sbsH = eyeH;
-    if (sbsW > 2048) {
-        float scale = 2048.f / (float)sbsW;
-        sbsW = 2048;
+    if (sbsW > 4096) {
+        float scale = 4096.f / (float)sbsW;
+        sbsW = 4096;
         sbsH = (uint32_t)((float)sbsH * scale);
         if (sbsH < 16) sbsH = 16;
+    }
+    if (sbsH > 4096) {
+        float scale = 4096.f / (float)sbsH;
+        sbsH = 4096;
+        sbsW = (uint32_t)((float)sbsW * scale);
+        if (sbsW < 16) sbsW = 16;
     }
     g_submitTexW = sbsW;
     g_submitTexH = sbsH;
@@ -254,8 +261,8 @@ bool ShareTextureFinish(ErrorFunc errFunc) {
     if (g_submitTexture && g_submitTexture != g_engineTexture) {
         // keep existing dual across soft restarts if size matches
     } else {
-        g_submitTexture = AllocRGBA8(g_submitTexW ? g_submitTexW : 2048,
-                                    g_submitTexH ? g_submitTexH : 1024);
+        g_submitTexture = AllocRGBA8(g_submitTexW ? g_submitTexW : 4096,
+                                    g_submitTexH ? g_submitTexH : 2048);
     }
     if (!g_submitTexture) {
         if (errFunc) errFunc("VRMOD: dual RGBA8 OUT alloc failed");
