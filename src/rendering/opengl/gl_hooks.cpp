@@ -29,6 +29,9 @@ static bool g_blitOk = false; // last PrepareSubmitTexture blit succeeded
 static GLuint g_fboRead = 0;
 static GLuint g_fboDraw = 0;
 static int s_log = 0;
+// Actual allocated OUT size (Begin may overwrite g_submitTexW/H before Finish reallocs)
+static uint32_t g_submitAllocW = 0;
+static uint32_t g_submitAllocH = 0;
 
 #ifndef GL_READ_FRAMEBUFFER
 #define GL_READ_FRAMEBUFFER 0x8CA8
@@ -219,6 +222,8 @@ static GLuint AllocRGBA8(uint32_t w, uint32_t h) {
 
     g_submitTexW = w;
     g_submitTexH = h;
+    g_submitAllocW = w;
+    g_submitAllocH = h;
     return tex;
 }
 
@@ -257,12 +262,22 @@ int ShareTextureBegin(uint32_t eyeW, uint32_t eyeH, ErrorFunc errFunc) {
 bool ShareTextureFinish(ErrorFunc errFunc) {
     RemoveTexturePatch(errFunc);
 
-    // Dual OUT is mandatory — never fall back to eng Submit (permanent 105)
-    if (g_submitTexture && g_submitTexture != g_engineTexture) {
-        // keep existing dual across soft restarts if size matches
-    } else {
-        g_submitTexture = AllocRGBA8(g_submitTexW ? g_submitTexW : 4096,
-                                    g_submitTexH ? g_submitTexH : 2048);
+    const uint32_t wantW = g_submitTexW ? g_submitTexW : 4096;
+    const uint32_t wantH = g_submitTexH ? g_submitTexH : 2048;
+
+    // Dual OUT is mandatory — never fall back to eng Submit (permanent 105).
+    // Realloc when size changes so supersample / HMD rec updates take effect.
+    if (g_submitTexture && g_submitTexture != g_engineTexture &&
+        (g_submitAllocW != wantW || g_submitAllocH != wantH)) {
+        VRMOD_LOG_INFO("ShareTextureFinish: size change %ux%u → %ux%u, realloc OUT",
+                       g_submitAllocW, g_submitAllocH, wantW, wantH);
+        glDeleteTextures(1, &g_submitTexture);
+        g_submitTexture = 0;
+        g_submitAllocW = g_submitAllocH = 0;
+    }
+
+    if (!g_submitTexture || g_submitTexture == g_engineTexture) {
+        g_submitTexture = AllocRGBA8(wantW, wantH);
     }
     if (!g_submitTexture) {
         if (errFunc) errFunc("VRMOD: dual RGBA8 OUT alloc failed");
@@ -364,6 +379,7 @@ void ShareTextureReset() {
     g_sharedTexture = 0;
     g_engineTexture = 0;
     g_submitTexW = g_submitTexH = 0;
+    g_submitAllocW = g_submitAllocH = 0;
     g_captureArmed = false;
     g_blitOk = false;
     s_log = 0;

@@ -33,23 +33,15 @@ static constexpr float kHmdSmoothCutoffSpeed = 0.35f; // m/s in Source units aft
 
 void UpdateRecommendedSize() {
     g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
-    // Linux/ToGL shared-image path: allow up to 4096 on the SBS dimension.
-    // (2048 was a hard potato cap — half HMD res on many headsets.)
-    // Still clamp so width*2 and height both fit in 4096.
-    const int maxTexSize = 4096;
-    uint32_t eyeWidth = recommendedWidth;
-    uint32_t eyeHeight = recommendedHeight;
-    uint32_t totalWidth = eyeWidth * 2;
-    float wScale = (float)maxTexSize / (float)totalWidth;
-    float hScale = (float)maxTexSize / (float)eyeHeight;
-    float scaleFactor = std::min(1.0f, std::min(wScale, hScale));
-    recommendedWidth = (uint32_t)(eyeWidth * scaleFactor);
-    recommendedHeight = (uint32_t)(eyeHeight * scaleFactor);
+    // Return *raw* HMD recommended per-eye size so Lua can supersample first,
+    // then clamp SBS to 4096 once. Pre-crushing here made SS a no-op (potato).
     if (recommendedWidth < 16) recommendedWidth = 512;
     if (recommendedHeight < 16) recommendedHeight = 512;
-    VRMOD_LOG_INFO("UpdateRecommendedSize: eye %ux%u (SBS %ux%u, cap %d)",
-                   recommendedWidth, recommendedHeight,
-                   recommendedWidth * 2, recommendedHeight, maxTexSize);
+    // Sanity ceiling only (absurd driver values)
+    if (recommendedWidth > 8192) recommendedWidth = 8192;
+    if (recommendedHeight > 8192) recommendedHeight = 8192;
+    VRMOD_LOG_INFO("UpdateRecommendedSize: raw HMD eye %ux%u (Lua applies SS + 4096 SBS clamp)",
+                   recommendedWidth, recommendedHeight);
 }
 
 void TickRenderQualityLadder() {
