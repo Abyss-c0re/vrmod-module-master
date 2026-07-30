@@ -187,11 +187,15 @@ LUA_FUNCTION(GetDisplayInfo) {
 }
 
 LUA_FUNCTION(UpdatePosesAndActions) {
+    if (!g_compositor)
+        return 0;
+    // OpenVR: WaitGetPoses must precede Submit every frame (frame order law).
     g_compositor->WaitGetPoses(g_poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
     // Quality ladder after poses (reduce-work / drops → interleaved reprojection).
     // Internal only — no new Lua exports (compat with older module contracts).
     TickRenderQualityLadder();
-    g_pInput->UpdateActionState(g_activeActionSets, sizeof(vr::VRActiveActionSet_t), g_activeActionSetCount);
+    if (g_pInput && g_activeActionSetCount > 0)
+        g_pInput->UpdateActionState(g_activeActionSets, sizeof(vr::VRActiveActionSet_t), g_activeActionSetCount);
     return 0;
 }
 

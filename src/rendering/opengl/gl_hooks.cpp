@@ -26,12 +26,15 @@ bool                g_glIsPatched = false;
 
 static bool g_captureArmed = false;
 static bool g_blitOk = false; // last PrepareSubmitTexture blit succeeded
+static bool g_everBlittedOk = false; // at least one good eng→OUT transfer this session
 static GLuint g_fboRead = 0;
 static GLuint g_fboDraw = 0;
 static int s_log = 0;
 // Actual allocated OUT size (Begin may overwrite g_submitTexW/H before Finish reallocs)
 static uint32_t g_submitAllocW = 0;
 static uint32_t g_submitAllocH = 0;
+// Defer delete of previous OUT until after next Submit (compositor may still hold it)
+static GLuint g_pendingDeleteTex = 0;
 
 #ifndef GL_READ_FRAMEBUFFER
 #define GL_READ_FRAMEBUFFER 0x8CA8
@@ -265,15 +268,20 @@ bool ShareTextureFinish(ErrorFunc errFunc) {
     const uint32_t wantW = g_submitTexW ? g_submitTexW : 4096;
     const uint32_t wantH = g_submitTexH ? g_submitTexH : 2048;
 
-    // Dual OUT is mandatory — never fall back to eng Submit (permanent 105).
-    // Realloc when size changes so supersample / HMD rec updates take effect.
+    // Dual OUT is mandatory — never fall back to eng Submit (105 UnsupportedFormat).
+    // Realloc on size change; defer glDelete until after Submit so compositor is safe.
     if (g_submitTexture && g_submitTexture != g_engineTexture &&
         (g_submitAllocW != wantW || g_submitAllocH != wantH)) {
         VRMOD_LOG_INFO("ShareTextureFinish: size change %ux%u → %ux%u, realloc OUT",
                        g_submitAllocW, g_submitAllocH, wantW, wantH);
-        glDeleteTextures(1, &g_submitTexture);
+        if (g_pendingDeleteTex && g_pendingDeleteTex != g_submitTexture &&
+            g_pendingDeleteTex != g_engineTexture) {
+            glDeleteTextures(1, &g_pendingDeleteTex);
+        }
+        g_pendingDeleteTex = g_submitTexture;
         g_submitTexture = 0;
         g_submitAllocW = g_submitAllocH = 0;
+        g_everBlittedOk = false; // new surface needs a fresh blit before Submit
     }
 
     if (!g_submitTexture || g_submitTexture == g_engineTexture) {
@@ -283,6 +291,9 @@ bool ShareTextureFinish(ErrorFunc errFunc) {
         if (errFunc) errFunc("VRMOD: dual RGBA8 OUT alloc failed");
         return false;
     }
+    // Keep logical size in sync with allocation (Begin may have set want; Alloc clamps)
+    g_submitTexW = g_submitAllocW ? g_submitAllocW : wantW;
+    g_submitTexH = g_submitAllocH ? g_submitAllocH : wantH;
     g_sharedTexture = g_submitTexture;
     if (!g_engineTexture)
         VRMOD_LOG_WARN("ShareTextureFinish: eng IN not captured (hook miss) — blit will fail until recapture");
@@ -342,6 +353,7 @@ bool PrepareSubmitTexture() {
     if (rs == GL_FRAMEBUFFER_COMPLETE && ds == GL_FRAMEBUFFER_COMPLETE) {
         p_blit(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         g_blitOk = true;
+        g_everBlittedOk = true;
         if (s_log++ < 10)
             VRMOD_LOG_INFO("FLOW engIN=%u → subOUT=%u %dx%d ok",
                            (unsigned)g_engineTexture, (unsigned)g_submitTexture, (int)w, (int)h);
@@ -373,6 +385,11 @@ void ShareTextureReset() {
     RemoveTexturePatch(nullptr);
     if (g_fboRead && p_delFbo) { p_delFbo(1, &g_fboRead); g_fboRead = 0; }
     if (g_fboDraw && p_delFbo) { p_delFbo(1, &g_fboDraw); g_fboDraw = 0; }
+    if (g_pendingDeleteTex && g_pendingDeleteTex != g_engineTexture &&
+        g_pendingDeleteTex != g_submitTexture) {
+        glDeleteTextures(1, &g_pendingDeleteTex);
+    }
+    g_pendingDeleteTex = 0;
     if (g_submitTexture && g_submitTexture != g_engineTexture)
         glDeleteTextures(1, &g_submitTexture);
     g_submitTexture = 0;
@@ -382,5 +399,18 @@ void ShareTextureReset() {
     g_submitAllocW = g_submitAllocH = 0;
     g_captureArmed = false;
     g_blitOk = false;
+    g_everBlittedOk = false;
     s_log = 0;
+}
+
+bool ShareTextureHasGoodFrame() {
+    return g_everBlittedOk && g_submitTexture != 0 && g_submitTexture != g_engineTexture
+        && g_submitTexW >= 16 && g_submitTexH >= 16;
+}
+
+void ShareTextureRetirePending() {
+    if (!g_pendingDeleteTex) return;
+    if (g_pendingDeleteTex != g_engineTexture && g_pendingDeleteTex != g_submitTexture)
+        glDeleteTextures(1, &g_pendingDeleteTex);
+    g_pendingDeleteTex = 0;
 }

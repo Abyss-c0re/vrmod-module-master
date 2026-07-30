@@ -46,3 +46,5 @@ bool PrepareSubmitTexture(); // eng IN → submit OUT blit; returns blit ok
 bool ConsumeBlitReady();
 void ClearBlitReady();
 void ShareTextureReset();
+bool ShareTextureHasGoodFrame();  // true after ≥1 successful eng→OUT blit
+void ShareTextureRetirePending(); // free deferred OUT after Submit

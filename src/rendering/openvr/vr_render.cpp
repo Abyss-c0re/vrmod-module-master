@@ -184,16 +184,27 @@ SubmitResult SubmitFrames() {
     if (outTex == 0 || outTex == g_engineTexture) {
         static int n = 0;
         if (++n <= 5 || (n % 180) == 0)
-            VRMOD_LOG_ERROR("No dual OUT texture — refuse eng Submit (would 105)");
+            VRMOD_LOG_ERROR("No dual OUT texture — refuse eng Submit (would 105 UnsupportedFormat)");
         ClearBlitReady();
         return res; // RequestFailed — visible, not hidden
+    }
+
+    // Never Submit a virgin OUT (zeros / never blitted): OpenVR 105 TextureUsesUnsupportedFormat
+    // or black forever. Wait until eng→OUT has succeeded at least once.
+    if (!ShareTextureHasGoodFrame()) {
+        static int n = 0;
+        if (++n <= 8 || (n % 180) == 0)
+            VRMOD_LOG_WARN("Skip Submit: no good blit yet (eng IN missing or FBO fail) tex=%u %ux%u blit=%d",
+                           (unsigned)outTex, g_submitTexW, g_submitTexH, blitOk ? 1 : 0);
+        ClearBlitReady();
+        return res;
     }
 
     if (!blitOk) {
         static int n = 0;
         if (++n <= 8 || (n % 180) == 0)
-            VRMOD_LOG_WARN("Blit eng→OUT failed this frame — still Submit last OUT (truthful)");
-        // Fall through: last good dual frame may still be valid size for LizardTech
+            VRMOD_LOG_WARN("Blit eng→OUT failed this frame — Submit last good OUT");
+        // Fall through: last good dual frame is still valid for compositor
     }
 
     g_vrTexture.handle = (void*)(uintptr_t)outTex;
@@ -220,6 +231,8 @@ SubmitResult SubmitFrames() {
     // OpenVR OpenGL contract: flush after dual Submit so the compositor can
     // acquire the shared texture without missing the frame (deep-research-8).
     glFlush();
+    // Safe to free previous OUT now that this frame's Submit used the new id
+    ShareTextureRetirePending();
     ClearBlitReady();
     return res;
 }
