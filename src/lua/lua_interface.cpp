@@ -188,6 +188,9 @@ LUA_FUNCTION(GetDisplayInfo) {
 
 LUA_FUNCTION(UpdatePosesAndActions) {
     g_compositor->WaitGetPoses(g_poses, vr::k_unMaxTrackedDeviceCount, NULL, 0);
+    // Quality ladder after poses (reduce-work / drops → interleaved reprojection).
+    // Internal only — no new Lua exports (compat with older module contracts).
+    TickRenderQualityLadder();
     g_pInput->UpdateActionState(g_activeActionSets, sizeof(vr::VRActiveActionSet_t), g_activeActionSetCount);
     return 0;
 }
@@ -197,17 +200,24 @@ LUA_FUNCTION(GetPoses) {
     vr::TrackedDevicePose_t pose = g_poses[0];
     char* poseName = (char*)"hmd";
     int poseRef = g_luaRefs[LuaRefIndex_HmdPose];
+    // Predict action poses toward photons (HMD from WaitGetPoses already photon-timed).
+    const float predSec = GetPosePredictionSeconds();
     LUA->ReferencePush(g_luaRefs[LuaRefIndex_PoseTable]);
     for (int i = -1; i < g_actionCount; i++) {
         if (i != -1) {
             if (g_actions[i].type == ActionType_Pose) {
-                g_pInput->GetPoseActionDataRelativeToNow(g_actions[i].handle, vr::TrackingUniverseStanding, 0, &poseActionData, sizeof(poseActionData), vr::k_ulInvalidInputValueHandle);
+                g_pInput->GetPoseActionDataRelativeToNow(
+                    g_actions[i].handle, vr::TrackingUniverseStanding, predSec,
+                    &poseActionData, sizeof(poseActionData), vr::k_ulInvalidInputValueHandle);
                 pose = poseActionData.pose;
                 poseName = g_actions[i].name;
                 poseRef = g_actions[i].luaRefs[0];
             } else continue;
         }
         PoseResult pr = ConvertPose(pose);
+        // HMD-only position micro-smooth (controllers stay raw for input latency).
+        if (i == -1)
+            SmoothHmdPoseIfEnabled(pr);
         if (pr.valid) {
             Vector pos; pos.x = pr.pos[0]; pos.y = pr.pos[1]; pos.z = pr.pos[2];
             Vector vel; vel.x = pr.vel[0]; vel.y = pr.vel[1]; vel.z = pr.vel[2];

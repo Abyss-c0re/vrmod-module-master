@@ -3,8 +3,10 @@
 #include "core/vrmod_log.h"
 #include "rendering/opengl/gl_hooks.h"
 
+#include <GL/gl.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 vr::IVRCompositor*      g_compositor = nullptr;
 vr::VRTextureBounds_t   g_textureBoundsLeft{};
@@ -12,6 +14,22 @@ vr::VRTextureBounds_t   g_textureBoundsRight{};
 vr::Texture_t           g_vrTexture{};
 uint32_t                recommendedWidth = 0;
 uint32_t                recommendedHeight = 0;
+
+// ── Backend quality ladder (no Lua surface change) ──
+// deep-research-8: reduce-work + drops → compositor interleaved reprojection;
+//                  glFlush after Submit; light HMD pos smooth; pose prediction.
+static bool  s_reduceWork = false;
+static bool  s_interleavedOn = false;
+static float s_posePredictSec = 0.f;
+static int   s_dropStreak = 0;
+static int   s_okStreak = 0;
+
+// HMD position EMA (Source space after ConvertPose)
+static bool  s_hmdSmoothInit = false;
+static float s_hmdSmoothPos[3] = {0, 0, 0};
+// ~0.12 equivalent: blend = 1 - smooth; lower smooth = snappier
+static constexpr float kHmdSmoothAmt = 0.12f;
+static constexpr float kHmdSmoothCutoffSpeed = 0.35f; // m/s in Source units after convert
 
 void UpdateRecommendedSize() {
     g_pSystem->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
@@ -28,6 +46,99 @@ void UpdateRecommendedSize() {
     if (recommendedWidth < 16) recommendedWidth = 512;
     if (recommendedHeight < 16) recommendedHeight = 512;
     VRMOD_LOG_DEBUG("UpdateRecommendedSize: %u x %u", recommendedWidth, recommendedHeight);
+}
+
+void TickRenderQualityLadder() {
+    if (!g_compositor)
+        return;
+
+    // 1) System reduce-work flag (IVRSystem)
+    s_reduceWork = false;
+    if (g_pSystem)
+        s_reduceWork = g_pSystem->ShouldApplicationReduceRenderingWork();
+
+    // 2) Frame timing: dropped frames / long wait → stress
+    vr::Compositor_FrameTiming ft{};
+    ft.m_nSize = sizeof(ft);
+    bool stress = s_reduceWork;
+    if (g_compositor->GetFrameTiming(&ft, 0)) {
+        if (ft.m_nNumDroppedFrames > 0)
+            s_dropStreak = std::min(s_dropStreak + (int)ft.m_nNumDroppedFrames, 30);
+        else
+            s_dropStreak = std::max(0, s_dropStreak - 1);
+
+        if (ft.m_flWaitForPresentCpuMs > 2.0f || ft.m_flClientFrameIntervalMs > 16.0f)
+            stress = true;
+        if (s_dropStreak >= 2)
+            stress = true;
+
+        // Pose prediction toward photons (clamped)
+        float remain = g_compositor->GetFrameTimeRemaining();
+        if (remain > 0.f && remain < 0.05f)
+            s_posePredictSec = remain;
+        else if (ft.m_flClientFrameIntervalMs > 1.f && ft.m_flClientFrameIntervalMs < 40.f)
+            s_posePredictSec = (ft.m_flClientFrameIntervalMs * 0.001f) * 0.5f;
+        else
+            s_posePredictSec = 0.011f; // ~half frame @90Hz fallback
+    } else {
+        s_posePredictSec = 0.011f;
+    }
+
+    if (stress)
+        s_okStreak = 0;
+    else
+        s_okStreak = std::min(s_okStreak + 1, 60);
+
+    // 3) Interleaved reprojection under load (compositor motion smoothing assist)
+    //    Clear only after sustained good frames so we don't thrash the flag.
+    bool wantInterleaved = stress || s_dropStreak >= 2;
+    if (wantInterleaved && !s_interleavedOn) {
+        g_compositor->ForceInterleavedReprojectionOn(true);
+        s_interleavedOn = true;
+        static int n = 0;
+        if (++n <= 5 || (n % 300) == 0)
+            VRMOD_LOG_INFO("Quality ladder: interleaved reprojection ON (reduce=%d drops=%d)",
+                           s_reduceWork ? 1 : 0, s_dropStreak);
+    } else if (!wantInterleaved && s_interleavedOn && s_okStreak >= 45) {
+        g_compositor->ForceInterleavedReprojectionOn(false);
+        s_interleavedOn = false;
+        VRMOD_LOG_INFO("Quality ladder: interleaved reprojection OFF (stable)");
+    }
+}
+
+float GetPosePredictionSeconds() {
+    return s_posePredictSec;
+}
+
+void SmoothHmdPoseIfEnabled(PoseResult& pr) {
+    if (!pr.valid)
+        return;
+
+    float speed = std::sqrt(pr.vel[0] * pr.vel[0] + pr.vel[1] * pr.vel[1] + pr.vel[2] * pr.vel[2]);
+    if (speed >= kHmdSmoothCutoffSpeed) {
+        s_hmdSmoothPos[0] = pr.pos[0];
+        s_hmdSmoothPos[1] = pr.pos[1];
+        s_hmdSmoothPos[2] = pr.pos[2];
+        s_hmdSmoothInit = true;
+        return;
+    }
+
+    if (!s_hmdSmoothInit) {
+        s_hmdSmoothPos[0] = pr.pos[0];
+        s_hmdSmoothPos[1] = pr.pos[1];
+        s_hmdSmoothPos[2] = pr.pos[2];
+        s_hmdSmoothInit = true;
+        return;
+    }
+
+    // Exponential blend toward raw (higher amt → more lag / smoother)
+    const float a = std::clamp(1.f - kHmdSmoothAmt, 0.05f, 1.f);
+    s_hmdSmoothPos[0] += (pr.pos[0] - s_hmdSmoothPos[0]) * a;
+    s_hmdSmoothPos[1] += (pr.pos[1] - s_hmdSmoothPos[1]) * a;
+    s_hmdSmoothPos[2] += (pr.pos[2] - s_hmdSmoothPos[2]) * a;
+    pr.pos[0] = s_hmdSmoothPos[0];
+    pr.pos[1] = s_hmdSmoothPos[1];
+    pr.pos[2] = s_hmdSmoothPos[2];
 }
 
 static void ClampBounds(vr::VRTextureBounds_t& b, bool left) {
@@ -110,6 +221,9 @@ SubmitResult SubmitFrames() {
     }
 
     g_compositor->PostPresentHandoff();
+    // OpenVR OpenGL contract: flush after dual Submit so the compositor can
+    // acquire the shared texture without missing the frame (deep-research-8).
+    glFlush();
     ClearBlitReady();
     return res;
 }
