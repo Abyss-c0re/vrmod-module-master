@@ -1,0 +1,46 @@
+# Build trees
+build_release/
+build_tests/
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+*.cmake
+!CMakeLists.txt
+
+# Compiled objects / libraries / module binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+*.pcm
+*.gcda
+*.gcno
+*.gcov
+
+# Install / package output
+install/
+backup/
+modules.zip
+*.tar.gz
+
+# Downloaded / local deps (fetched by build.sh)
+deps/
+
+# Editor / OS / local noise
+*.log
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

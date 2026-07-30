@@ -39,8 +39,8 @@ PoseResult ConvertPose(const vr::TrackedDevicePose_t& pose) {
     r.angvel[1] = -pose.vAngularVelocity.v[0] * (180.0f / PI_F);
     r.angvel[2] =  pose.vAngularVelocity.v[1] * (180.0f / PI_F);
 
-    VRMOD_LOG_DEBUG("ConvertPose: pos(%.2f,%.2f,%.2f) ang(%.2f,%.2f,%.2f)",
-                    r.pos[0], r.pos[1], r.pos[2], r.ang[0], r.ang[1], r.ang[2]);
+    //
+    // ConvertPose debug silenced
     return r;
 }
 

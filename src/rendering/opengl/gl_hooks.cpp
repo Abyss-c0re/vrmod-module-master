@@ -2,148 +2,362 @@
 #include "core/vrmod_log.h"
 
 #include <cstring>
+#include <cerrno>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <vector>
 
-// ── Global GL state definitions ──
+// BlackCube → LizardTech / OpenVR compositor texture OUT
+//
+// Law: engine RT is IN (Source ToGL). Submit surface is OUT (module RGBA8).
+// Never Submit raw eng id (compositor: format=43 dimensions=0x0 → 105).
+// Never gate blit on glGetTexLevel of eng — ToGL returns 0x0 while RT is live.
+// Always blit at known SBS size from ShareTextureBegin (Lua RT matches).
+
 char                g_createTextureOrigBytes[14];
 void*               g_createTexture = NULL;
 GLuint              g_sharedTexture = 0;
+GLuint              g_engineTexture = 0;
+GLuint              g_submitTexture = 0;
+uint32_t            g_submitTexW = 0;
+uint32_t            g_submitTexH = 0;
 COpenGLEntryPoints* g_GL = NULL;
 bool                g_glIsPatched = false;
 
-void BuildCreateTextureHookPatch(void* CreateTextureHook, uint8_t outPatch[HOOK_SIZE]) {
-    uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(CreateTextureHook));
-    uint32_t low  = static_cast<uint32_t>(addr & 0xFFFFFFFF);
-    uint32_t high = static_cast<uint32_t>((addr >> 32) & 0xFFFFFFFF);
+static bool g_captureArmed = false;
+static bool g_blitOk = false; // last PrepareSubmitTexture blit succeeded
+static GLuint g_fboRead = 0;
+static GLuint g_fboDraw = 0;
+static int s_log = 0;
 
-    // push imm32
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#endif
+#ifndef GL_DRAW_FRAMEBUFFER
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER 0x8D40
+#endif
+#ifndef GL_COLOR_ATTACHMENT0
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#endif
+#ifndef GL_FRAMEBUFFER_COMPLETE
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#endif
+#ifndef GL_FRAMEBUFFER_BINDING
+#define GL_FRAMEBUFFER_BINDING 0x8CA6
+#endif
+#ifndef GL_READ_FRAMEBUFFER_BINDING
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#endif
+#ifndef GL_COLOR_BUFFER_BIT
+#define GL_COLOR_BUFFER_BIT 0x00004000
+#endif
+#ifndef GL_NEAREST
+#define GL_NEAREST 0x2600
+#endif
+
+typedef void (*PFNGLBLITFRAMEBUFFER)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+typedef void (*PFNGLBINDFRAMEBUFFER)(GLenum, GLuint);
+typedef void (*PFNGLGENFRAMEBUFFERS)(GLsizei, GLuint*);
+typedef void (*PFNGLDELETEFRAMEBUFFERS)(GLsizei, GLuint*);
+typedef void (*PFNGLFRAMEBUFFERTEXTURE2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef GLenum (*PFNGLCHECKFRAMEBUFFERSTATUS)(GLenum);
+
+static PFNGLBLITFRAMEBUFFER p_blit = nullptr;
+static PFNGLBINDFRAMEBUFFER p_bindFbo = nullptr;
+static PFNGLGENFRAMEBUFFERS p_genFbo = nullptr;
+static PFNGLDELETEFRAMEBUFFERS p_delFbo = nullptr;
+static PFNGLFRAMEBUFFERTEXTURE2D p_fboTex = nullptr;
+static PFNGLCHECKFRAMEBUFFERSTATUS p_checkFbo = nullptr;
+static bool g_ext = false;
+
+static void* LoadGL(const char* name) {
+    void* p = (void*)glXGetProcAddress((const GLubyte*)name);
+    if (!p) p = (void*)glXGetProcAddressARB((const GLubyte*)name);
+    return p;
+}
+
+static void ResolveExt() {
+    if (g_ext) return;
+    g_ext = true;
+    p_blit = (PFNGLBLITFRAMEBUFFER)LoadGL("glBlitFramebuffer");
+    if (!p_blit) p_blit = (PFNGLBLITFRAMEBUFFER)LoadGL("glBlitFramebufferEXT");
+    p_bindFbo = (PFNGLBINDFRAMEBUFFER)LoadGL("glBindFramebuffer");
+    if (!p_bindFbo) p_bindFbo = (PFNGLBINDFRAMEBUFFER)LoadGL("glBindFramebufferEXT");
+    p_genFbo = (PFNGLGENFRAMEBUFFERS)LoadGL("glGenFramebuffers");
+    if (!p_genFbo) p_genFbo = (PFNGLGENFRAMEBUFFERS)LoadGL("glGenFramebuffersEXT");
+    p_delFbo = (PFNGLDELETEFRAMEBUFFERS)LoadGL("glDeleteFramebuffers");
+    if (!p_delFbo) p_delFbo = (PFNGLDELETEFRAMEBUFFERS)LoadGL("glDeleteFramebuffersEXT");
+    p_fboTex = (PFNGLFRAMEBUFFERTEXTURE2D)LoadGL("glFramebufferTexture2D");
+    if (!p_fboTex) p_fboTex = (PFNGLFRAMEBUFFERTEXTURE2D)LoadGL("glFramebufferTexture2DEXT");
+    p_checkFbo = (PFNGLCHECKFRAMEBUFFERSTATUS)LoadGL("glCheckFramebufferStatus");
+    if (!p_checkFbo) p_checkFbo = (PFNGLCHECKFRAMEBUFFERSTATUS)LoadGL("glCheckFramebufferStatusEXT");
+    VRMOD_LOG_INFO("GL FBO ext blit=%d bind=%d gen=%d", p_blit ? 1 : 0, p_bindFbo ? 1 : 0, p_genFbo ? 1 : 0);
+}
+
+void BuildCreateTextureHookPatch(void* hookFn, uint8_t outPatch[HOOK_SIZE]) {
+    uint64_t addr = (uint64_t)(uintptr_t)hookFn;
+    uint32_t low = (uint32_t)(addr & 0xffffffffu);
+    uint32_t high = (uint32_t)(addr >> 32);
     outPatch[0] = 0x68;
-    std::memcpy(&outPatch[1], &low, sizeof(low));
-
-    // mov dword ptr [rsp+4], imm32
+    memcpy(outPatch + 1, &low, 4);
     outPatch[5] = 0xC7;
     outPatch[6] = 0x44;
     outPatch[7] = 0x24;
     outPatch[8] = 0x04;
-    std::memcpy(&outPatch[9], &high, sizeof(high));
-
-    // ret
+    memcpy(outPatch + 9, &high, 4);
     outPatch[13] = 0xC3;
 }
 
-void CreateTextureHook(GLsizei n, GLuint *textures) {
-    memcpy((void*)g_createTexture, (void*)g_createTextureOrigBytes, 14);
-    ((glGenTextures_t)g_createTexture)(n, textures);
-    g_sharedTexture = textures[0];
+static bool SetProt(uintptr_t addr, size_t len, int prot) {
+    size_t page = getpagesize();
+    uintptr_t start = addr & ~(page - 1);
+    uintptr_t end = (addr + len + page - 1) & ~(page - 1);
+    return mprotect((void*)start, end - start, prot) == 0;
 }
 
-bool RemoveTexturePatch(ErrorFunc errFunc) {
-    if (!g_glIsPatched) {
-        VRMOD_LOG_INFO("Patch not applied, nothing to remove.");
-        return true;
-    }
-
-    uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
-    size_t    pageSize = getpagesize();
-    uintptr_t start    = addr & ~(pageSize - 1);
-    uintptr_t end      = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
-    size_t    len      = end - start;
-
-    if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        if (errFunc) errFunc("VRMOD: Failed to set memory protection to RWX for unpatch.");
+static bool InstallPatch(ErrorFunc errFunc) {
+    if (g_glIsPatched) return true;
+    if (!g_createTexture) {
+        if (errFunc) errFunc("VRMOD: g_createTexture null");
         return false;
     }
-
-    // Restore original bytes
-    std::memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
-
-    // Verify restoration
-    if (std::memcmp((void*)addr, g_createTextureOrigBytes, HOOK_SIZE) != 0) {
-        if (errFunc) errFunc("VRMOD: Failed to verify unpatch — bytes mismatch.");
-        // Still try to set protection back
-        mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+    uint8_t patch[HOOK_SIZE];
+    BuildCreateTextureHookPatch((void*)(uintptr_t)CreateTextureHook, patch);
+    uintptr_t addr = (uintptr_t)g_createTexture;
+    if (!SetProt(addr, HOOK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC) &&
+        !SetProt(addr, HOOK_SIZE, PROT_READ | PROT_WRITE)) {
+        if (errFunc) errFunc("VRMOD: mprotect failed");
         return false;
     }
-
-    // Reset memory protection
-    if (mprotect((void*)start, len, PROT_READ | PROT_EXEC) != 0) {
-        if (errFunc) errFunc("VRMOD: Failed to reset memory protection after unpatch.");
-        return false;
-    }
-
-    g_glIsPatched = false;
-    VRMOD_LOG_INFO("Texture patch removed successfully.");
+    memcpy(g_createTextureOrigBytes, (void*)addr, HOOK_SIZE);
+    memcpy((void*)addr, patch, HOOK_SIZE);
+    // Keep RWX while armed (CreateTextureHook restores bytes in-place)
+    g_glIsPatched = true;
     return true;
 }
 
-int ShareTextureBegin(uint32_t texWidth, uint32_t texHeight, ErrorFunc errFunc) {
-    // Tear down previous
-    if (glIsTexture(g_sharedTexture)) {
-        glDeleteTextures(1, &g_sharedTexture);
-        g_sharedTexture = 0;
-        glFlush();
+bool RemoveTexturePatch(ErrorFunc errFunc) {
+    if (!g_glIsPatched || !g_createTexture) {
+        g_glIsPatched = false;
+        return true;
+    }
+    uintptr_t addr = (uintptr_t)g_createTexture;
+    if (!SetProt(addr, HOOK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC) &&
+        !SetProt(addr, HOOK_SIZE, PROT_READ | PROT_WRITE)) {
+        if (errFunc) errFunc("VRMOD: mprotect unpatch failed");
+        return false;
+    }
+    memcpy((void*)addr, g_createTextureOrigBytes, HOOK_SIZE);
+    SetProt(addr, HOOK_SIZE, PROT_READ | PROT_EXEC);
+    g_glIsPatched = false;
+    return true;
+}
+
+void CreateTextureHook(GLsizei n, GLuint* textures) {
+    memcpy(g_createTexture, g_createTextureOrigBytes, 14);
+    g_glIsPatched = false;
+    ((glGenTextures_t)g_createTexture)(n, textures);
+    if (!g_captureArmed || n <= 0 || !textures) return;
+    g_engineTexture = textures[0];
+    g_captureArmed = false;
+    VRMOD_LOG_INFO("Captured eng RT id=%u (IN)", (unsigned)g_engineTexture);
+}
+
+static GLuint AllocRGBA8(uint32_t w, uint32_t h) {
+    if (w < 16) w = 1024;
+    if (h < 16) h = 1024;
+    if (w > 2048) w = 2048;
+    if (h > 2048) h = 2048;
+
+    if (g_glIsPatched) RemoveTexturePatch(nullptr);
+
+    GLuint tex = 0;
+    // ToGL glGenTextures — same GL context namespace as Source (native often returns 0)
+    if (g_createTexture)
+        ((glGenTextures_t)g_createTexture)(1, &tex);
+    if (tex == 0)
+        glGenTextures(1, &tex);
+    if (tex == 0) {
+        VRMOD_LOG_WARN("AllocRGBA8 GenTex failed");
+        return 0;
     }
 
-    // Generate & bind new texture
-    glGenTextures(1, &g_sharedTexture);
-    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
+    glBindTexture(GL_TEXTURE_2D, tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-
-    // Allocate storage (RGBA8) – contents undefined until we clear
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGBA8,
-        texWidth * 2,
-        texHeight,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        nullptr
-    );
-
-    // Clamp to transparent border + linear filtering
-    GLfloat borderColor[4] = {0,0,0,0};
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    while (glGetError() != GL_NO_ERROR) {}
+    std::vector<unsigned char> zeros((size_t)w * (size_t)h * 4, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, zeros.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
 
-    glBindTexture(GL_TEXTURE_2D, g_sharedTexture);
-
-    // Hook-patch logic unchanged
-    if (g_glIsPatched)
-        return 0;
-
-    uint8_t patch[HOOK_SIZE];
-    void*    hookAddr = reinterpret_cast<void*>(
-                           reinterpret_cast<uintptr_t>(CreateTextureHook));
-    BuildCreateTextureHookPatch(hookAddr, patch);
-
-    uintptr_t addr     = reinterpret_cast<uintptr_t>(g_createTexture);
-    size_t    pageSize = getpagesize();
-    uintptr_t startPg  = addr & ~(pageSize - 1);
-    uintptr_t endPg    = (addr + HOOK_SIZE + pageSize - 1) & ~(pageSize - 1);
-    size_t    length   = endPg - startPg;
-
-    if (mprotect(reinterpret_cast<void*>(startPg),
-                 length,
-                 PROT_READ|PROT_WRITE|PROT_EXEC) == -1) {
-        if (errFunc) errFunc("VRMOD: mprotect RWX failed");
-        return -1;
+    // Establish FBO-completeness of submit surface once (helps compositor size probe)
+    ResolveExt();
+    if (p_genFbo && p_bindFbo && p_fboTex && p_checkFbo) {
+        GLuint fbo = 0;
+        p_genFbo(1, &fbo);
+        GLint prev = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+        p_bindFbo(GL_FRAMEBUFFER, fbo);
+        p_fboTex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        GLenum st = p_checkFbo(GL_FRAMEBUFFER);
+        p_fboTex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        p_bindFbo(GL_FRAMEBUFFER, (GLuint)prev);
+        if (p_delFbo) p_delFbo(1, &fbo);
+        VRMOD_LOG_INFO("AllocRGBA8 id=%u %ux%u fboStatus=0x%x (OUT)", (unsigned)tex, w, h, (unsigned)st);
+    } else {
+        VRMOD_LOG_INFO("AllocRGBA8 id=%u %ux%u (OUT, no FBO probe)", (unsigned)tex, w, h);
     }
 
-    memcpy(g_createTextureOrigBytes,
-           reinterpret_cast<void*>(addr),
-           HOOK_SIZE);
-    memcpy(reinterpret_cast<void*>(addr),
-           patch,
-           HOOK_SIZE);
+    g_submitTexW = w;
+    g_submitTexH = h;
+    return tex;
+}
 
-    g_glIsPatched = true;
-    VRMOD_LOG_INFO("Texture hook patch applied.");
+int ShareTextureBegin(uint32_t eyeW, uint32_t eyeH, ErrorFunc errFunc) {
+    ResolveExt();
+    if (eyeW == 0) eyeW = 1024;
+    if (eyeH == 0) eyeH = 1024;
+    uint32_t sbsW = eyeW * 2;
+    uint32_t sbsH = eyeH;
+    if (sbsW > 2048) {
+        float scale = 2048.f / (float)sbsW;
+        sbsW = 2048;
+        sbsH = (uint32_t)((float)sbsH * scale);
+        if (sbsH < 16) sbsH = 16;
+    }
+    g_submitTexW = sbsW;
+    g_submitTexH = sbsH;
+
+    g_captureArmed = true;
+    if (!g_createTexture) {
+        if (errFunc) errFunc("VRMOD: g_createTexture null");
+        return -1;
+    }
+    if (!InstallPatch(errFunc))
+        return -1;
+    VRMOD_LOG_INFO("ShareTextureBegin armed SBS %ux%u (IN hook + OUT dual)", sbsW, sbsH);
     return 0;
+}
+
+bool ShareTextureFinish(ErrorFunc errFunc) {
+    RemoveTexturePatch(errFunc);
+
+    // Dual OUT is mandatory — never fall back to eng Submit (permanent 105)
+    if (g_submitTexture && g_submitTexture != g_engineTexture) {
+        // keep existing dual across soft restarts if size matches
+    } else {
+        g_submitTexture = AllocRGBA8(g_submitTexW ? g_submitTexW : 2048,
+                                    g_submitTexH ? g_submitTexH : 1024);
+    }
+    if (!g_submitTexture) {
+        if (errFunc) errFunc("VRMOD: dual RGBA8 OUT alloc failed");
+        return false;
+    }
+    g_sharedTexture = g_submitTexture;
+    if (!g_engineTexture)
+        VRMOD_LOG_WARN("ShareTextureFinish: eng IN not captured (hook miss) — blit will fail until recapture");
+    VRMOD_LOG_INFO("ShareTextureFinish engIN=%u subOUT=%u %ux%u",
+                   (unsigned)g_engineTexture, (unsigned)g_submitTexture,
+                   g_submitTexW, g_submitTexH);
+    return true;
+}
+
+bool ConsumeBlitReady() {
+    bool r = g_blitOk;
+    // do not clear here — SubmitFrames reads then we clear after Submit
+    return r;
+}
+
+void ClearBlitReady() {
+    g_blitOk = false;
+}
+
+bool PrepareSubmitTexture() {
+    g_blitOk = false;
+    if (!g_submitTexture || g_submitTexture == g_engineTexture)
+        return false;
+    if (!g_engineTexture)
+        return false;
+    if (g_submitTexW < 16 || g_submitTexH < 16)
+        return false;
+
+    ResolveExt();
+    if (!p_bindFbo || !p_fboTex || !p_blit || !p_genFbo || !p_checkFbo) {
+        if (s_log++ < 3)
+            VRMOD_LOG_ERROR("FBO extensions missing — cannot transfer eng IN → submit OUT");
+        return false;
+    }
+
+    GLint prevDraw = 0, prevRead = 0, prevTex = 0, vp[4] = {0,0,0,0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevDraw);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_VIEWPORT, vp);
+
+    if (!g_fboRead) p_genFbo(1, &g_fboRead);
+    if (!g_fboDraw) p_genFbo(1, &g_fboDraw);
+
+    // Known SBS size from Begin/Lua — NEVER use GetTexLevel on eng (ToGL lies 0x0)
+    const GLsizei w = (GLsizei)g_submitTexW;
+    const GLsizei h = (GLsizei)g_submitTexH;
+
+    p_bindFbo(GL_READ_FRAMEBUFFER, g_fboRead);
+    p_fboTex(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_engineTexture, 0);
+    GLenum rs = p_checkFbo(GL_READ_FRAMEBUFFER);
+
+    p_bindFbo(GL_DRAW_FRAMEBUFFER, g_fboDraw);
+    p_fboTex(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_submitTexture, 0);
+    GLenum ds = p_checkFbo(GL_DRAW_FRAMEBUFFER);
+
+    if (rs == GL_FRAMEBUFFER_COMPLETE && ds == GL_FRAMEBUFFER_COMPLETE) {
+        p_blit(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        g_blitOk = true;
+        if (s_log++ < 10)
+            VRMOD_LOG_INFO("FLOW engIN=%u → subOUT=%u %dx%d ok",
+                           (unsigned)g_engineTexture, (unsigned)g_submitTexture, (int)w, (int)h);
+    } else {
+        if (s_log++ < 20)
+            VRMOD_LOG_WARN("FLOW blit FAIL rs=0x%x ds=0x%x eng=%u sub=%u %dx%d",
+                           (unsigned)rs, (unsigned)ds,
+                           (unsigned)g_engineTexture, (unsigned)g_submitTexture,
+                           (int)w, (int)h);
+    }
+
+    // Detach so textures are free for compositor / Source
+    p_bindFbo(GL_READ_FRAMEBUFFER, g_fboRead);
+    p_fboTex(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    p_bindFbo(GL_DRAW_FRAMEBUFFER, g_fboDraw);
+    p_fboTex(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+
+    p_bindFbo(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+    p_bindFbo(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
+    p_bindFbo(GL_FRAMEBUFFER, (GLuint)prevDraw);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+    // No glFinish — crashes Source under ToGL
+    glFlush();
+    return g_blitOk;
+}
+
+void ShareTextureReset() {
+    RemoveTexturePatch(nullptr);
+    if (g_fboRead && p_delFbo) { p_delFbo(1, &g_fboRead); g_fboRead = 0; }
+    if (g_fboDraw && p_delFbo) { p_delFbo(1, &g_fboDraw); g_fboDraw = 0; }
+    if (g_submitTexture && g_submitTexture != g_engineTexture)
+        glDeleteTextures(1, &g_submitTexture);
+    g_submitTexture = 0;
+    g_sharedTexture = 0;
+    g_engineTexture = 0;
+    g_submitTexW = g_submitTexH = 0;
+    g_captureArmed = false;
+    g_blitOk = false;
+    s_log = 0;
 }

@@ -286,44 +286,44 @@ LUA_FUNCTION(GetActions) {
 }
 
 LUA_FUNCTION(ShareTextureBegin) {
-    // Clear previous texture bounds and vr texture when tearing down
-    if (glIsTexture(g_sharedTexture)) {
-        memset(&g_textureBoundsLeft,  0, sizeof(g_textureBoundsLeft));
-        memset(&g_textureBoundsRight, 0, sizeof(g_textureBoundsRight));
-        g_vrTexture = { nullptr, vr::TextureType_Invalid, vr::ColorSpace_Auto };
-    }
+    memset(&g_textureBoundsLeft,  0, sizeof(g_textureBoundsLeft));
+    memset(&g_textureBoundsRight, 0, sizeof(g_textureBoundsRight));
+    g_vrTexture = { nullptr, vr::TextureType_Invalid, vr::ColorSpace_Gamma };
 
-    // Error bridge: capture LUA pointer for ThrowError
-    GarrysMod::Lua::ILuaBase* luaPtr = LUA;
+    // Capture last error for Lua (errBridge cannot ThrowError across C++ stack safely mid-call)
+    static thread_local char s_lastShareErr[256];
+    s_lastShareErr[0] = 0;
     auto errBridge = [](const char* msg) {
-        // In release, errors are posted via lua; logging is a noop
-        VRMOD_LOG_ERROR("%s", msg);
+        VRMOD_LOG_ERROR("%s", msg ? msg : "(null)");
+        if (msg)
+            snprintf(s_lastShareErr, sizeof(s_lastShareErr), "%s", msg);
     };
 
+    UpdateRecommendedSize();
+    VRMOD_LOG_INFO("ShareTextureBegin eye=%ux%u createTex=%p",
+                   recommendedWidth, recommendedHeight, g_createTexture);
     int rc = ShareTextureBegin(recommendedWidth, recommendedHeight, errBridge);
     if (rc != 0) {
-        LUA->ThrowError("VRMOD: mprotect RWX failed");
+        char buf[320];
+        snprintf(buf, sizeof(buf), "VRMOD: ShareTextureBegin failed: %s",
+                 s_lastShareErr[0] ? s_lastShareErr : "unknown (see vrmod_debug.log)");
+        LUA->ThrowError(buf);
     }
     return 0;
 }
 
 LUA_FUNCTION(ShareTextureFinish) {
-    if (g_sharedTexture == 0 || !glIsTexture(g_sharedTexture)) {
-        LUA->ThrowError("VRMOD: Failed to generate shared texture.");
-        return 0;
-    }
-    g_vrTexture.handle = (void*)(uintptr_t)g_sharedTexture;
-    g_vrTexture.eType = vr::TextureType_OpenGL;
-    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
-
     auto errBridge = [](const char* msg) {
         VRMOD_LOG_ERROR("%s", msg);
     };
 
-    if (!RemoveTexturePatch(errBridge)) {
-        LUA->ThrowError("VRMOD: Failed to remove the texture path.");
+    if (!ShareTextureFinish(errBridge)) {
+        LUA->ThrowError("VRMOD: ShareTextureFinish failed");
+        return 0;
     }
-
+    g_vrTexture.handle = (void*)(uintptr_t)(g_submitTexture ? g_submitTexture : g_sharedTexture);
+    g_vrTexture.eType = vr::TextureType_OpenGL;
+    g_vrTexture.eColorSpace = vr::ColorSpace_Gamma;
     return 0;
 }
 
@@ -344,10 +344,14 @@ LUA_FUNCTION(SetSubmitTextureBounds) {
 LUA_FUNCTION(SubmitSharedTexture) {
     SubmitResult res = SubmitFrames();
     if (!res.ok()) {
-        std::string errMsg =
-            "VRMOD: OpenVR Submit failed: Left: " + std::to_string(res.errLeft) +
-            ", Right: " + std::to_string(res.errRight);
-        LuaPrint(LUA, errMsg.c_str());
+        static int s = 0;
+        if (++s <= 5 || (s % 180) == 0) {
+            std::string errMsg =
+                "VRMOD: OpenVR Submit failed: Left: " + std::to_string(res.errLeft) +
+                ", Right: " + std::to_string(res.errRight) +
+                " (x" + std::to_string(s) + ")";
+            LuaPrint(LUA, errMsg.c_str());
+        }
     }
     return 0;
 }
@@ -359,8 +363,9 @@ LUA_FUNCTION(Shutdown) {
         return 0;
     if (g_compositor) {
         g_compositor->ClearLastSubmittedFrame();
+        ShareTextureReset();
+        g_vrTexture = { nullptr, vr::TextureType_Invalid, vr::ColorSpace_Gamma };
         glFlush();
-        glFinish();
 
         for (int i = 0; i < g_luaRefCount; i++) {
             if (g_luaRefs[i] != 0) {
@@ -415,7 +420,7 @@ LUA_FUNCTION(GetTrackedDeviceNames) {
 // ── Module entry points ──
 
 GMOD_MODULE_OPEN() {
-    VRMOD_LOG_INIT("vrmod_debug.log");
+    VRMOD_LOG_INIT("/home/voldemar/.local/share/Steam/steamapps/common/GarrysMod/vrmod_debug.log");
     VRMOD_LOG_INFO("Module loading...");
 
     LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);

@@ -51,17 +51,21 @@ add_library(vrmod_release SHARED
 )
 
 target_include_directories(vrmod_release PRIVATE ${VRMOD_INCLUDE_DIRS})
+# VRMOD_DEV_BUILD: file log to vrmod_debug.log (required for auto-test loop)
+target_compile_definitions(vrmod_release PRIVATE VRMOD_DEV_BUILD)
 target_compile_options(vrmod_release PRIVATE -O3 -m64)
 target_link_directories(vrmod_release PRIVATE ${OPENVR_LIB_DIR})
 target_link_libraries(vrmod_release PRIVATE openvr_api dl)
 
+# Module lives at garrysmod/lua/bin; OpenVR at bin/ and bin/linux64 (modules.zip layout).
+# From lua/bin: ../../../../bin/linux64 → GarrysMod/bin/linux64
 set_target_properties(vrmod_release PROPERTIES
     OUTPUT_NAME "gmcl_vrmod_linux64"
     PREFIX ""
     SUFFIX ".dll"
     LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
-    BUILD_RPATH "\$ORIGIN"
-    INSTALL_RPATH "\$ORIGIN"
+    BUILD_RPATH "\$ORIGIN/../../../../bin/linux64:\$ORIGIN/../../../../bin"
+    INSTALL_RPATH "\$ORIGIN/../../../../bin/linux64:\$ORIGIN/../../../../bin"
 )
 
 # ==============================================================
