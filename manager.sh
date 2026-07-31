@@ -4,7 +4,13 @@
 BUILD_SCRIPT="./build.sh"
 INSTALL_DIR="./install"
 BACKUP_DIR="./backup"
-GAME_DEST="$HOME/.steam/steam/steamapps/common/GarrysMod"
+if [ -d "$SteamLibrary/steamapps/common/GarrysMod" ]; then
+    GAME_DEST="$SteamLibrary/steamapps/common/GarrysMod"
+elif [ -d "$HOME/.steam/steam/steamapps/common/GarrysMod" ]; then
+    GAME_DEST="$HOME/.steam/steam/steamapps/common/GarrysMod"
+else
+    GAME_DEST="$HOME/.steam/steamapps/common/GarrysMod"
+fi
 
 timestamp() {
     date +"%Y%m%d_%H%M%S"
